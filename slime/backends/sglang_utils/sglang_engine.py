@@ -497,6 +497,69 @@ class SGLangEngine(RayActor):
         logger.info(f"Simulating crash on engine {self.server_host}:{self.server_port}...")
         self.shutdown()
 
+    def generate(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict,
+        request_id: str | None = None,
+    ):
+        """Generate tokens from prompt_ids using the SGLang HTTP server.
+
+        This method is designed to be called via Ray RPC from the Harbor LLM proxy.
+
+        Args:
+            prompt_ids: List of token IDs for the prompt.
+            sampling_params: Dict with keys like temperature, top_p, max_new_tokens, stop.
+            request_id: Optional request ID for tracking.
+
+        Returns:
+            A dataclass-like object with token_ids, log_probs, and stop_reason attributes.
+        """
+        if self.node_rank != 0:
+            # Non-primary nodes don't serve HTTP
+            return None
+
+        import dataclasses
+
+        payload = {
+            "input_ids": prompt_ids,
+            "sampling_params": sampling_params,
+            "return_logprob": True,
+        }
+        if request_id:
+            payload["rid"] = request_id
+
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/generate",
+            json=payload,
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        # Extract token_ids and log_probs from meta_info
+        meta_info = result.get("meta_info", {})
+        
+        # output_token_logprobs is a list of [log_prob, token_id] pairs
+        output_token_logprobs = meta_info.get("output_token_logprobs", [])
+        token_ids = [item[1] for item in output_token_logprobs] if output_token_logprobs else []
+        log_probs = [item[0] for item in output_token_logprobs] if output_token_logprobs else []
+        
+        # Get finish reason
+        finish_reason = meta_info.get("finish_reason", {}).get("type")
+
+        # Build a dataclass-like return object
+        @dataclasses.dataclass
+        class GenerateOutput:
+            token_ids: list[int]
+            log_probs: list[float] | None
+            stop_reason: str | None
+
+        return GenerateOutput(
+            token_ids=token_ids,
+            log_probs=log_probs if log_probs else None,
+            stop_reason=finish_reason,
+        )
+
 
 def _compute_server_args(
     args,

@@ -1332,6 +1332,127 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
 
             return parser
 
+        def add_harbor_arguments(parser):
+            """Add Harbor remote-agent integration arguments."""
+            # Harbor server
+            parser.add_argument(
+                "--harbor-server-url",
+                type=str,
+                default="http://localhost:8080",
+                help="Harbor Agent Run server URL.",
+            )
+            parser.add_argument(
+                "--harbor-timeout",
+                type=float,
+                default=1800.0,
+                help="Timeout in seconds for Harbor task execution.",
+            )
+
+            # Agent configuration
+            parser.add_argument(
+                "--harbor-agent-name",
+                type=str,
+                default=None,
+                help="Name of a built-in Harbor agent (e.g. 'swe-agent').",
+            )
+            parser.add_argument(
+                "--harbor-agent-import-path",
+                type=str,
+                default=None,
+                help="Python import path for custom agent (e.g. 'my_agents:MyAgent').",
+            )
+            parser.add_argument(
+                "--harbor-model-name",
+                type=str,
+                default=None,
+                help="LLM model name passed to the remote agent.",
+            )
+            parser.add_argument(
+                "--harbor-agent-kwargs",
+                type=json.loads,
+                default="{}",
+                help="JSON-encoded dict of extra kwargs for the agent.",
+            )
+
+            # Environment configuration
+            parser.add_argument(
+                "--harbor-env-overrides",
+                type=json.loads,
+                default="{}",
+                help="JSON-encoded dict of env vars forwarded to the remote agent.",
+            )
+            parser.add_argument(
+                "--harbor-env-import-path",
+                type=str,
+                default="harbor.environments.local_docker:LocalDockerEnvironment",
+                help="Python import path for the environment class (e.g., harbor.environments.ack:ACKEnvironment).",
+            )
+            parser.add_argument(
+                "--harbor-env-kwargs",
+                type=json.loads,
+                default="{}",
+                help="JSON-encoded dict of kwargs for the environment constructor.",
+            )
+
+            # Task configuration
+            parser.add_argument(
+                "--harbor-task-path-template",
+                type=str,
+                default="/home/slime/dataset-tasks/{instance_id}",
+                help="Task path template with {instance_id} placeholder.",
+            )
+
+            # Proxy configuration
+            parser.add_argument(
+                "--harbor-proxy-host",
+                type=str,
+                default="0.0.0.0",
+                help="Bind host for the LLM proxy server.",
+            )
+            parser.add_argument(
+                "--harbor-proxy-port",
+                type=int,
+                default=0,
+                help="Port for the LLM proxy server. 0 = auto-select.",
+            )
+
+            # Retry configuration
+            parser.add_argument(
+                "--harbor-max-retries",
+                type=int,
+                default=3,
+                help="Max retry attempts on Harbor task failure.",
+            )
+            parser.add_argument(
+                "--harbor-retry-base-delay",
+                type=float,
+                default=2.0,
+                help="Base delay in seconds for exponential backoff.",
+            )
+
+            # Output reconstruction
+            parser.add_argument(
+                "--harbor-disable-reconstruct",
+                action="store_true",
+                default=False,
+                help="Disable token reconstruction from proxy session data.",
+            )
+
+            # Local trial mode
+            parser.add_argument(
+                "--harbor-use-local-trial",
+                action="store_true",
+                default=False,
+                help=(
+                    "Run the Harbor Trial locally instead of submitting to a remote "
+                    "Harbor server. Requires the 'harbor' package to be installed. "
+                    "The TokenProxy still works normally — LLM calls go through "
+                    "the proxy and tokens are captured for training."
+                ),
+            )
+
+            return parser
+
         def add_ci_arguments(parser):
             parser.add_argument(
                 "--ci-test",
@@ -1372,6 +1493,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
         parser = add_rollout_buffer_arguments(parser)
+        parser = add_harbor_arguments(parser)
         parser = add_mtp_training_arguments(parser)
         parser = add_ci_arguments(parser)
         parser = add_custom_megatron_plugins_arguments(parser)

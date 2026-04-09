@@ -216,6 +216,16 @@ class Dataset:
             prompt = _build_messages(data, prompt_key, as_conversation, multimodal_keys)
 
             metadata = data.get(metadata_key) or {}
+            # Also collect other top-level fields into metadata (e.g., task_name, id, instance_id)
+            reserved_keys = {prompt_key}
+            for k in (label_key, metadata_key, tool_key):
+                if k is not None:
+                    reserved_keys.add(k)
+            if multimodal_keys:
+                reserved_keys = reserved_keys | set(multimodal_keys.keys())
+            for k, v in data.items():
+                if k not in reserved_keys and k not in metadata and not k.startswith("_"):
+                    metadata[k] = v
             tools = None
             if tool_key is not None and tool_key in data:
                 tools = data[tool_key]
