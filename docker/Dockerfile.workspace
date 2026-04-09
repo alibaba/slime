@@ -1,0 +1,26 @@
+FROM slimerl/slime:latest
+
+# 设置工作目录
+WORKDIR /root/slime
+
+RUN cd /root/Megatron-LM && pip install -e .
+
+# 清理原有的 slime 代码
+RUN rm -rf /root/slime/*
+
+# 复制本地 /workspace 下的代码到镜像中
+# 注意：构建时需要将代码挂载或复制到构建上下文中
+COPY . /root/slime/
+
+# 重新安装 slime（开发模式，使用本地代码）
+RUN pip install -e . --no-deps
+RUN pip install shortuuid
+
+# 重新安装 int4_qat 内核（如果存在）
+RUN if [ -d "/root/slime/slime/backends/megatron_utils/kernels/int4_qat" ]; then \
+        cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
+        pip install . --no-build-isolation; \
+    fi
+
+# 设置工作目录
+WORKDIR /root/slime
