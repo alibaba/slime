@@ -1,6 +1,6 @@
 """LLM Proxy Server — capture token-level data from Harbor agent calls.
 
-Architecture::
+Architecture (Ray mode)::
 
     Harbor Agent (in Docker/K8s)
          |  (OpenAI /v1/chat/completions)
@@ -16,13 +16,23 @@ Architecture::
                     v
              SGLang rollout servers
 
+Architecture (Standalone mode)::
+
+    Engine 1 ── POST /engines/register ──→  ┌──────────────────────┐
+    Engine 2 ── POST /engines/register ──→  │     TokenProxy       │
+                                             │                      │
+    Harbor Agent ── /{trial_id}/v1/chat/ ──→ │  - EngineRegistry    │
+                    completions              │  - SGlangHTTPProvider│
+                                             │  - SessionRecorder   │
+                                             └──────────────────────┘
+
 Usage from train.py::
 
     from slime.rollout.remote_agent.proxy import start_proxy_server
 
     proxy_url = start_proxy_server(
         engine_handles=engine_handles,
-        model_path=args.hf_checkpoint,
+        model_path=args.***,
         host=args.harbor_proxy_host,
         port=args.harbor_proxy_port,
     )
@@ -32,18 +42,33 @@ Usage from generate function::
     from slime.rollout.remote_agent.proxy import get_proxy_url
 
     url = get_proxy_url()  # discover the proxy URL
+
+Standalone usage::
+
+    from slime.rollout.remote_agent.proxy import start_standalone_proxy
+
+    proxy_url = start_standalone_proxy(
+        model_path="/path/to/model",
+        host="0.0.0.0",
+        port=8888,
+    )
+
+    # Engines self-register:
+    # POST /engines/register {"url": "http://localhost:30000", ...}
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import ray
@@ -149,6 +174,150 @@ class SessionRecorder:
         """List all active session IDs."""
         with self._lock:
             return list(self._sessions.keys())
+
+
+# ---------- Engine Registry (Standalone Mode) ----------
+
+
+@dataclass
+class EngineInfo:
+    """Metadata for a registered SGLang engine."""
+    engine_id: str
+    url: str
+    model: str
+    max_concurrent: int
+    heartbeat_interval: int
+    registered_at: float = field(default_factory=time.time)
+    last_heartbeat: float = field(default_factory=time.time)
+    active_requests: int = 0
+    total_requests: int = 0
+    healthy: bool = True
+
+
+class EngineRegistry:
+    """Thread-safe registry for standalone-mode engines that self-register."""
+
+    def __init__(self) -> None:
+        self._engines: dict[str, EngineInfo] = {}
+        self._lock = threading.Lock()
+        # Sticky-session load balancing: session_id -> engine_id
+        self._sticky: dict[str, str] = {}
+
+    def register(
+        self,
+        url: str,
+        model: str,
+        max_concurrent: int = 8,
+        heartbeat_interval: int = 30,
+    ) -> EngineInfo:
+        """Register a new engine. Returns the EngineInfo with assigned ID."""
+        engine_id = f"eng_{uuid4().hex[:12]}"
+        info = EngineInfo(
+            engine_id=engine_id,
+            url=url,
+            model=model,
+            max_concurrent=max_concurrent,
+            heartbeat_interval=heartbeat_interval,
+        )
+        with self._lock:
+            self._engines[engine_id] = info
+        logger.info("Engine registered: %s (url=%s, max_concurrent=%d)", engine_id, url, max_concurrent)
+        return info
+
+    def unregister(self, engine_id: str) -> bool:
+        """Deregister an engine. Returns True if found and removed."""
+        with self._lock:
+            removed = self._engines.pop(engine_id, None)
+            if removed:
+                # Clean up sticky bindings for this engine
+                self._sticky = {k: v for k, v in self._sticky.items() if v != engine_id}
+                logger.info("Engine unregistered: %s", engine_id)
+                return True
+        return False
+
+    def heartbeat(self, engine_id: str) -> bool:
+        """Update heartbeat timestamp. Returns True if engine exists."""
+        with self._lock:
+            engine = self._engines.get(engine_id)
+            if engine:
+                engine.last_heartbeat = time.time()
+                engine.healthy = True
+                return True
+        return False
+
+    def get_healthy_engines(self) -> list[EngineInfo]:
+        """Return list of currently healthy engines."""
+        now = time.time()
+        with self._lock:
+            healthy = []
+            stale_ids = []
+            for eid, eng in self._engines.items():
+                ttl = eng.heartbeat_interval * 3
+                if now - eng.last_heartbeat > ttl:
+                    eng.healthy = False
+                    stale_ids.append(eid)
+                else:
+                    healthy.append(eng)
+            # Auto-remove stale engines
+            for eid in stale_ids:
+                del self._engines[eid]
+                logger.warning("Engine %s removed (stale, no heartbeat for %ds)", eid, ttl)
+            return healthy
+
+    def choose_engine(self, session_id: str | None = None) -> str | None:
+        """Pick an engine URL using sticky sessions + least-load."""
+        engines = self.get_healthy_engines()
+        if not engines:
+            return None
+
+        # Sticky session
+        if session_id and session_id in self._sticky:
+            target_id = self._sticky[session_id]
+            for eng in engines:
+                if eng.engine_id == target_id:
+                    return eng.url
+            # Sticky engine gone, fall through
+
+        # Least-load: lowest (active_requests / max_concurrent) ratio
+        best = min(engines, key=lambda e: e.active_requests / max(e.max_concurrent, 1))
+        if session_id:
+            self._sticky[session_id] = best.engine_id
+        return best.url
+
+    def release_session(self, session_id: str) -> None:
+        """Remove sticky binding for a session."""
+        with self._lock:
+            self._sticky.pop(session_id, None)
+
+    def increment_active(self, engine_id: str) -> None:
+        with self._lock:
+            eng = self._engines.get(engine_id)
+            if eng:
+                eng.active_requests += 1
+                eng.total_requests += 1
+
+    def decrement_active(self, engine_id: str) -> None:
+        with self._lock:
+            eng = self._engines.get(engine_id)
+            if eng:
+                eng.active_requests = max(0, eng.active_requests - 1)
+
+    def list_engines(self) -> list[dict]:
+        """Return engine list for debug endpoint."""
+        engines = self.get_healthy_engines()
+        return [
+            {
+                "engine_id": e.engine_id,
+                "url": e.url,
+                "model": e.model,
+                "max_concurrent": e.max_concurrent,
+                "active_requests": e.active_requests,
+                "total_requests": e.total_requests,
+                "healthy": e.healthy,
+                "last_heartbeat": e.last_heartbeat,
+            }
+            for e in engines
+        ]
 
 
 # ---------- SGLang Ray Provider (LiteLLM CustomLLM) ----------
@@ -287,6 +456,160 @@ class SGLangRayProvider:
             total_tokens=len(token_ids),
         )
         return model_response
+
+
+# ---------- SGLang HTTP Provider (Standalone Mode) ----------
+
+
+class SGlangHTTPProvider:
+    """LiteLLM custom provider that routes requests to SGLang via HTTP.
+
+    Used in standalone mode where engines self-register with the proxy
+    and the proxy load-balances across them.
+    """
+
+    def __init__(self, registry: EngineRegistry, tokenizer: AutoTokenizer):
+        self.registry = registry
+        self.tokenizer = tokenizer
+        self._http_client = None
+
+    async def _get_client(self):
+        """Lazy-init the async HTTP client."""
+        if self._http_client is None:
+            import httpx
+            self._http_client = httpx.AsyncClient(timeout=300.0)
+        return self._http_client
+
+    def release_session(self, session_id: str) -> None:
+        """Remove sticky-session binding."""
+        self.registry.release_session(session_id)
+
+    # -- LiteLLM CustomLLM interface --
+
+    async def acompletion(
+        self,
+        model,
+        messages,
+        api_base,
+        custom_prompt_dict,
+        model_response,
+        print_verbose,
+        encoding,
+        api_key,
+        logging_obj,
+        optional_params,
+        **kwargs,
+    ):
+        """Async chat completion via SGLang HTTP."""
+        optional_params = optional_params or {}
+        session_id = (optional_params.get("extra_body") or {}).get("session_id")
+        temperature = optional_params.get("temperature", 1.0)
+        top_p = optional_params.get("top_p", 1.0)
+        max_tokens = optional_params.get("max_tokens", 2048)
+        stop = optional_params.get("stop")
+
+        # Pick an engine from the registry
+        engine_url = self.registry.choose_engine(session_id)
+        if engine_url is None:
+            raise RuntimeError(
+                "No healthy engines registered. "
+                "Engines must POST /engines/register before generating."
+            )
+
+        engine_info = self.registry.get_engine_by_url(engine_url)
+        if engine_info:
+            self.registry.increment_active(engine_info.engine_id)
+
+        try:
+            # Tokenize
+            normalized = _normalize_messages(messages)
+            prompt_ids = self.tokenizer.apply_chat_template(
+                normalized, add_generation_prompt=True, tokenize=True
+            )
+
+            # Call SGLang via HTTP /generate endpoint
+            sampling_params = {
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_new_tokens": max_tokens,
+            }
+            if stop:
+                sampling_params["stop"] = stop
+
+            client = await self._get_client()
+            resp = await client.post(
+                f"{engine_url}/generate",
+                json={
+                    "input_ids": prompt_ids,
+                    "sampling_params": sampling_params,
+                    "stream": False,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Parse response — SGLang /generate returns:
+            # {"output_ids": [...], "meta_info": {...}}
+            token_ids = data.get("output_ids", [])
+            meta_info = data.get("meta_info", {})
+            log_probs = meta_info.get("logprobs", [])
+            stop_reason = meta_info.get("finish_reason", {}).get("type", "stop")
+
+            completion_text = self.tokenizer.decode(token_ids, skip_special_tokens=False)
+
+            # Build LiteLLM ModelResponse
+            from litellm.types.utils import (
+                ChatCompletionTokenLogprob,
+                ChoiceLogprobs,
+                Choices,
+                Message,
+                Usage,
+            )
+
+            logprobs_obj = None
+            if log_probs:
+                content = []
+                for tid, lp in zip(token_ids, log_probs):
+                    if isinstance(lp, dict):
+                        # SGLang logprobs are dicts with token prob info
+                        lp_val = lp.get("logprob", lp.get("token_logprob", 0))
+                    else:
+                        lp_val = float(lp)
+                    tok_str = self.tokenizer.decode([tid])
+                    content.append(
+                        ChatCompletionTokenLogprob(
+                            token=tok_str,
+                            logprob=lp_val,
+                            bytes=list(tok_str.encode("utf-8", errors="replace")),
+                            top_logprobs=[],
+                        )
+                    )
+                logprobs_obj = ChoiceLogprobs(content=content)
+
+            model_response.choices = [
+                Choices(
+                    finish_reason=stop_reason if isinstance(stop_reason, str) else "stop",
+                    index=0,
+                    message=Message(role="assistant", content=completion_text),
+                    logprobs=logprobs_obj,
+                    provider_specific_fields={"token_ids": token_ids},
+                )
+            ]
+            model_response.model = model
+            model_response.usage = Usage(
+                prompt_tokens=len(prompt_ids),
+                completion_tokens=len(token_ids),
+                total_tokens=len(prompt_ids) + len(token_ids),
+            )
+            return model_response
+
+        finally:
+            if engine_info:
+                self.registry.decrement_active(engine_info.engine_id)
+
+    def get_engine_by_url(self, url: str) -> EngineInfo | None:
+        """Find engine by URL."""
+        return self.registry.get_engine_by_url(url)
 
 
 # ---------- Message Normalization ----------
@@ -458,6 +781,50 @@ def _build_app(proxy: "TokenProxy") -> FastAPI:
         proxy.recorder.delete_session(session_id)
         return {"session_id": session_id, "status": "deleted"}
 
+    # -- Engine management (Standalone mode) --
+
+    @app.post("/engines/register")
+    async def register_engine(request: Request):
+        """Register a new SGLang engine with the proxy."""
+        body = await request.json()
+        url = body.get("url")
+        model = body.get("model", "unknown")
+        max_concurrent = body.get("max_concurrent", 8)
+        heartbeat_interval = body.get("heartbeat_interval", 30)
+
+        if not url:
+            raise HTTPException(status_code=400, detail="url is required")
+
+        info = proxy.engine_registry.register(
+            url=url,
+            model=model,
+            max_concurrent=max_concurrent,
+            heartbeat_interval=heartbeat_interval,
+        )
+        return {
+            "engine_id": info.engine_id,
+            "heartbeat_url": f"{proxy.url}/engines/{info.engine_id}/heartbeat",
+        }
+
+    @app.post("/engines/{engine_id}/heartbeat")
+    async def engine_heartbeat(engine_id: str):
+        """Engine heartbeat — keeps the engine in the routing pool."""
+        if proxy.engine_registry.heartbeat(engine_id):
+            return {"status": "ok"}
+        raise HTTPException(status_code=404, detail="Engine not found")
+
+    @app.post("/engines/{engine_id}/unregister")
+    async def unregister_engine(engine_id: str):
+        """Deregister an engine from the proxy."""
+        if proxy.engine_registry.unregister(engine_id):
+            return {"status": "ok"}
+        raise HTTPException(status_code=404, detail="Engine not found")
+
+    @app.get("/engines")
+    async def list_engines():
+        """List all registered engines (debug endpoint)."""
+        return {"engines": proxy.engine_registry.list_engines()}
+
     # -- OpenAI-compatible chat completions --
     # Two URL patterns so the proxy works with both:
     #   1. Agents that call a fully custom endpoint
@@ -517,31 +884,45 @@ class TokenProxy:
     """LLM Proxy server that holds SGLang server handles and serves
     OpenAI-compatible HTTP requests via LiteLLM.
 
-    Designed to be a **singleton** in the Ray cluster.
+    In Ray mode, designed to be a **singleton** in the Ray cluster.
     Created once when training starts and shared across all
     ``generate_with_harbor`` calls.
+
+    In standalone mode, runs as a standalone process. Engines
+    self-register via HTTP API.
     """
 
     def __init__(
         self,
-        engine_handles: list,
         model_path: str,
         host: str = "0.0.0.0",
         port: int = 0,
+        # Ray mode parameters
+        engine_handles: list | None = None,
+        # Standalone mode parameters
+        mode: Literal["ray", "standalone"] = "ray",
     ):
         self.host = host
         self.port = port
-        self.engine_handles = engine_handles
+        self.mode = mode
+        self.engine_handles = engine_handles or []
+        self.engine_registry = EngineRegistry()
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.recorder = SessionRecorder()
 
-        # Initialize LiteLLM custom provider
-        self._provider = SGLangRayProvider(engine_handles, self.tokenizer)
+        # Initialize the appropriate provider based on mode
         import litellm
-        litellm.custom_provider_map = [
-            {"provider": "slime-sglang", "custom_handler": self._provider}
-        ]
+        if mode == "standalone":
+            self._provider = SGlangHTTPProvider(self.engine_registry, self.tokenizer)
+            litellm.custom_provider_map = [
+                {"provider": "slime-sglang", "custom_handler": self._provider}
+            ]
+        else:
+            self._provider = SGLangRayProvider(self.engine_handles, self.tokenizer)
+            litellm.custom_provider_map = [
+                {"provider": "slime-sglang", "custom_handler": self._provider}
+            ]
 
         self.app = _build_app(self)
         self._server: uvicorn.Server | None = None
@@ -584,7 +965,7 @@ class TokenProxy:
                 break
             await asyncio.sleep(0.1)
 
-        logger.info("LLM Proxy started at %s", self.url)
+        logger.info("LLM Proxy started at %s (mode=%s)", self.url, self.mode)
         return self.url
 
     async def stop(self) -> None:
@@ -630,6 +1011,7 @@ class ProxyActor:
             model_path=model_path,
             host=host,
             port=port,
+            mode="ray",
         )
         self._url: str | None = None
 
@@ -728,3 +1110,125 @@ def stop_proxy_server() -> None:
     except ValueError:
         pass
     _proxy_actor_handle = None
+
+
+# ---------- Standalone Proxy (No Ray Required) ----------
+
+
+def start_standalone_proxy(
+    model_path: str,
+    host: str = "0.0.0.0",
+    port: int = 8888,
+) -> TokenProxy:
+    """Start the proxy server as a standalone process (no Ray required).
+
+    Engines self-register via HTTP API:
+        POST /engines/register {"url": "http://...", "model": "..."}
+
+    Args:
+        model_path: HuggingFace model name/path for the tokenizer.
+        host: Bind address for the HTTP server.
+        port: Port number.
+
+    Returns:
+        The TokenProxy instance with the running server.
+        Use ``proxy.url`` to get the base URL.
+    """
+    proxy = TokenProxy(
+        model_path=model_path,
+        host=host,
+        port=port,
+        mode="standalone",
+    )
+
+    # Run in a new thread since this is a sync function
+    loop = asyncio.new_event_loop()
+
+    def _run_server():
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(proxy.start())
+
+    thread = threading.Thread(target=_run_server, daemon=True)
+    thread.start()
+
+    # Wait for server to be ready
+    for _ in range(100):
+        if proxy.url is not None:
+            break
+        time.sleep(0.1)
+
+    if proxy.url is None:
+        raise RuntimeError("Failed to start standalone proxy server")
+
+    logger.info("Standalone proxy started at %s", proxy.url)
+    return proxy
+
+
+# ---------- CLI Entry Point ----------
+
+
+def main():
+    """CLI entry point for running the proxy in standalone mode."""
+    parser = argparse.ArgumentParser(
+        description="Slime LLM Proxy Server (standalone mode)"
+    )
+    parser.add_argument(
+        "--model-path", required=True,
+        help="HuggingFace model path for the tokenizer",
+    )
+    parser.add_argument(
+        "--host", default="0.0.0.0",
+        help="Bind address (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port", type=int, default=8888,
+        help="Port number (default: 8888)",
+    )
+    parser.add_argument(
+        "--log-level", default="info",
+        choices=["debug", "info", "warning", "error"],
+        help="Logging level",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+
+    print(f"Starting Slime LLM Proxy (standalone mode)")
+    print(f"  Model: {args.model_path}")
+    print(f"  Listen: {args.host}:{args.port}")
+    print()
+    print("Engines can register with:")
+    print(f"  POST http://{args.host}:{args.port}/engines/register")
+    print(f'  {{"url": "http://<engine-host>:<port>", "model": "..."}}')
+    print()
+
+    proxy = start_standalone_proxy(
+        model_path=args.model_path,
+        host=args.host,
+        port=args.port,
+    )
+
+    print(f"Proxy running at {proxy.url}")
+    print("Press Ctrl+C to stop.")
+
+    try:
+        # Keep the main thread alive
+        while True:
+            time.sleep(1)
+            # Print engine status periodically
+            engines = proxy.engine_registry.list_engines()
+            if engines:
+                active = sum(e["active_requests"] for e in engines)
+                print(f"  [{len(engines)} engine(s), {active} active requests]", end="\r")
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        import threading
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(proxy.stop())
+
+
+if __name__ == "__main__":
+    main()
