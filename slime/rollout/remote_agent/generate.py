@@ -78,6 +78,67 @@ class _HarborGenerateState(metaclass=SingletonMeta):
 
 
 # ---------------------------------------------------------------------------
+# SandboxSet routing
+# ---------------------------------------------------------------------------
+
+
+def _read_task_sandbox_class(task_path: str, class_key: str) -> str | None:
+    """Read the pod-size class from a task's ``task.toml``.
+
+    Looks up ``class_key`` under ``[metadata]``, ``[environment]``, ``[task]``
+    and the top level, in that order. Returns None if the file is missing /
+    unreadable or the key is absent.
+    """
+    toml_path = os.path.join(task_path, "task.toml")
+    try:
+        import tomllib
+
+        with open(toml_path, "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:  # malformed toml, permission error, ...
+        logger.warning("Failed to read sandbox class from %s: %s", toml_path, e)
+        return None
+
+    for section in ("metadata", "environment", "task"):
+        sec = data.get(section)
+        if isinstance(sec, dict) and sec.get(class_key):
+            return str(sec[class_key])
+    if data.get(class_key):
+        return str(data[class_key])
+    return None
+
+
+def _resolve_sandbox_set_name(
+    args: Namespace, sample: Sample, task_path: str
+) -> str | None:
+    """Resolve the target SandboxSet / pool name for this task.
+
+    Precedence:
+      1. an explicit ``sandbox_set_name`` in the sample metadata;
+      2. the pod-size class (``--harbor-sandbox-class-key``) from the sample
+         metadata, converted via ``--harbor-sandbox-set-name-template``;
+      3. the same class read from the task's ``task.toml``, converted likewise.
+
+    Returns None when nothing is found, so the environment falls back to its
+    default pool.
+    """
+    md = sample.metadata or {}
+    explicit = md.get("sandbox_set_name")
+    if explicit:
+        return str(explicit)
+
+    class_key = getattr(args, "harbor_sandbox_class_key", "sandbox_class")
+    sandbox_class = md.get(class_key) or _read_task_sandbox_class(task_path, class_key)
+    if not sandbox_class:
+        return None
+
+    template = getattr(args, "harbor_sandbox_set_name_template", "{sandbox_class}")
+    return template.format(sandbox_class=sandbox_class)
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -154,6 +215,18 @@ async def _generate_with_harbor_async(
         task_path = args.harbor_task_path_template.format(instance_id=instance_id)
         logger.info("[Harbor][%s] Resolved task_path=%s", trial_id, task_path)
 
+        # 4b. Resolve the per-task SandboxSet name from the task's pod-size class
+        # and merge it into the (otherwise global) environment kwargs so it
+        # reaches the Harbor environment / e2b SDK for this trial.
+        env_kwargs = dict(getattr(args, "harbor_env_kwargs", {}) or {})
+        sandbox_set_name = _resolve_sandbox_set_name(args, sample, task_path)
+        if sandbox_set_name:
+            key = getattr(args, "harbor_sandbox_set_key", "sandbox_set_name")
+            env_kwargs[key] = sandbox_set_name
+            logger.info(
+                "[Harbor][%s] Routing to SandboxSet %s=%s", trial_id, key, sandbox_set_name
+            )
+
         # 5. Build agent configuration
         agent_kwargs = dict(args.harbor_agent_kwargs)
         agent_kwargs["api_base"] = agent_base_url
@@ -183,7 +256,7 @@ async def _generate_with_harbor_async(
                 agent=agent_config,
                 verifier=HarborVerifierConfig(),
                 environment_overrides=env_overrides,
-                environment_kwargs=dict(getattr(args, "harbor_env_kwargs", {}) or {}),
+                environment_kwargs=env_kwargs,
                 timeout=args.harbor_timeout,
                 environment_import_path=args.harbor_env_import_path,
             )
@@ -196,6 +269,7 @@ async def _generate_with_harbor_async(
                 task_path=task_path,
                 agent_config=agent_config,
                 env_overrides=env_overrides,
+                environment_kwargs=env_kwargs,
                 proxy_url=proxy_url,
             )
         logger.info("[Harbor][%s] Trial completed with status=%s, reward=%s", trial_id, result.status, result.rewards)
@@ -276,6 +350,7 @@ async def _submit_with_retry(
     agent_config: HarborAgentConfig,
     env_overrides: dict[str, Any],
     proxy_url: str,
+    environment_kwargs: dict[str, Any] | None = None,
 ) -> HarborRunResult:
     """Submit to remote Harbor with exponential backoff retry.
 
@@ -314,7 +389,11 @@ async def _submit_with_retry(
                 agent=agent_config,
                 verifier=HarborVerifierConfig(),
                 environment_overrides=env_overrides,
-                environment_kwargs=dict(getattr(args, "harbor_env_kwargs", {}) or {}),
+                environment_kwargs=(
+                    environment_kwargs
+                    if environment_kwargs is not None
+                    else dict(getattr(args, "harbor_env_kwargs", {}) or {})
+                ),
             )
 
             if result.status == "completed":
