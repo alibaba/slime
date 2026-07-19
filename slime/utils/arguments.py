@@ -1451,6 +1451,38 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
 
+            # SandboxSet routing (per-task pod-size class -> SandboxSet name)
+            parser.add_argument(
+                "--harbor-sandbox-set-key",
+                type=str,
+                default="sandbox_set_name",
+                help=(
+                    "Environment-kwarg key under which the resolved SandboxSet / "
+                    "pool name is passed to the Harbor environment (and on to the "
+                    "e2b SDK). Set to match what the environment / gateway expects."
+                ),
+            )
+            parser.add_argument(
+                "--harbor-sandbox-class-key",
+                type=str,
+                default="sandbox_class",
+                help=(
+                    "Field name holding the per-task pod-size class. Looked up in "
+                    "the sample metadata and in the task's task.toml "
+                    "([metadata]/[environment]/[task] and top level)."
+                ),
+            )
+            parser.add_argument(
+                "--harbor-sandbox-set-name-template",
+                type=str,
+                default="{sandbox_class}",
+                help=(
+                    "Template that converts the size class into a SandboxSet name, "
+                    "e.g. 'swebench-verified-{sandbox_class}'. When no class is "
+                    "found the key is omitted and the environment uses its default."
+                ),
+            )
+
             return parser
 
         def add_ci_arguments(parser):
