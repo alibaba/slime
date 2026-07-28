@@ -388,6 +388,12 @@ class SGLangRayProvider:
         prompt_ids = self.tokenizer.apply_chat_template(
             normalized, add_generation_prompt=True, tokenize=True
         )
+        # Newer transformers may return a BatchEncoding / tensor instead of a
+        # flat list[int]; coerce so it is JSON-serializable for the engine RPC.
+        if hasattr(prompt_ids, "input_ids"):
+            prompt_ids = prompt_ids["input_ids"]
+        if hasattr(prompt_ids, "tolist"):
+            prompt_ids = prompt_ids.tolist()
 
         # Call SGLang via Ray RPC
         server = self._choose_server(session_id)
@@ -526,6 +532,12 @@ class SGlangHTTPProvider:
             prompt_ids = self.tokenizer.apply_chat_template(
                 normalized, add_generation_prompt=True, tokenize=True
             )
+            # Newer transformers may return a BatchEncoding / tensor instead of a
+            # flat list[int]; coerce so it is JSON-serializable for the engine RPC.
+            if hasattr(prompt_ids, "input_ids"):
+                prompt_ids = prompt_ids["input_ids"]
+            if hasattr(prompt_ids, "tolist"):
+                prompt_ids = prompt_ids.tolist()
 
             # Call SGLang via HTTP /generate endpoint
             sampling_params = {
