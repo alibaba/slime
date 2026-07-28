@@ -207,3 +207,32 @@ model.py:  step 0: {'train/loss': ..., 'train/entropy_loss': 2.10,
   避免重启后重转。
 - **Agent cost limit。** `--harbor-agent-kwargs '{"total_cost_limit":0,...}'` 没问题 —— SWE-agent
   将 `0` 视为*无限制*，而非「无预算」。
+
+---
+
+## 8. FAQ
+
+### `ModuleNotFoundError: No module named 'megatron.training'`（Megatron 训练 actor 中）
+
+现象：任务启动后 `MegatronTrainRayActor` 因 `No module named 'megatron.training'` 导入失败
+（或权重转换同样报错）。
+
+原因：`import megatron` 解析到 `dist-packages` 下安装的 **`megatron-core`** 命名空间包，其中**不含**
+`megatron.training`；`pip install -e /root/Megatron-LM` 不会把 Megatron-LM 注册进该命名空间；而且
+**Ray worker actor 不继承 driver 进程的 `PYTHONPATH`**，所以在启动前 `export PYTHONPATH=/root/Megatron-LM`
+只能修好 driver，修不了 actor。
+
+修复（已烘进 `docker/Dockerfile.workspace`）：通过 site-packages 下的 `.pth` 文件把 `/root/Megatron-LM`
+加入**所有** Python 进程的 `sys.path`，使 `megatron.training` 在每个 Ray worker 都可导入，无需依赖
+`PYTHONPATH`：
+
+```dockerfile
+RUN echo /root/Megatron-LM > "$(python -c 'import site; print(site.getsitepackages()[0])')/zzz_megatron_lm.pth"
+```
+
+若在运行中的 pod 上遇到（如未重建镜像的临时测试），运行时执行同样一行即可：
+
+```bash
+echo /root/Megatron-LM > "$(python -c 'import site; print(site.getsitepackages()[0])')/zzz_megatron_lm.pth"
+python -c "from megatron.training.arguments import parse_args; print('ok')"   # 验证
+```

@@ -215,3 +215,34 @@ reward to get a learning signal.
   the `--ref-load` checkpoint on a durable volume so a restart doesn't force reconversion.
 - **Agent cost limits.** `--harbor-agent-kwargs '{"total_cost_limit":0,...}'` is fine — SWE-agent
   treats `0` as *unlimited*, not "no budget".
+
+---
+
+## 8. FAQ
+
+### `ModuleNotFoundError: No module named 'megatron.training'` (in the Megatron train actors)
+
+Symptom: the run starts, but the `MegatronTrainRayActor` fails to import with
+`No module named 'megatron.training'` (or the checkpoint conversion fails the same way).
+
+Cause: `import megatron` resolves to the installed **`megatron-core`** namespace package under
+`dist-packages`, which does **not** contain `megatron.training`. `pip install -e /root/Megatron-LM`
+does not register Megatron-LM into that namespace, and — crucially — **Ray worker actors do not
+inherit the driver process's `PYTHONPATH`**, so exporting `PYTHONPATH=/root/Megatron-LM` before
+launching only fixes the driver, not the actors.
+
+Fix (baked into `docker/Dockerfile.workspace`): add `/root/Megatron-LM` to `sys.path` for **every**
+Python process via a `.pth` file in site-packages, so `megatron.training` is importable in all Ray
+workers without relying on `PYTHONPATH`:
+
+```dockerfile
+RUN echo /root/Megatron-LM > "$(python -c 'import site; print(site.getsitepackages()[0])')/zzz_megatron_lm.pth"
+```
+
+If you hit this on a running pod (e.g. testing without rebuilding the image), apply the same line
+at runtime:
+
+```bash
+echo /root/Megatron-LM > "$(python -c 'import site; print(site.getsitepackages()[0])')/zzz_megatron_lm.pth"
+python -c "from megatron.training.arguments import parse_args; print('ok')"   # verify
+```
