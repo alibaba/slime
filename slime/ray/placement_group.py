@@ -1,4 +1,5 @@
 import logging
+import os
 import socket
 
 import ray
@@ -181,9 +182,15 @@ def create_training_models(args, pgs, rollout_manager):
 
 
 def create_rollout_manager(args, pg):
+    # In Harbor local-trial mode the harbor Trial (and the E2B SDK it drives) runs *inside*
+    # the RolloutManager actor, which does not inherit the driver's environment. Forward the
+    # E2B/Harbor connection env vars (e.g. E2B_API_KEY, E2B_API_URL, E2B_SANDBOX_URL) so the
+    # in-actor sandbox client can authenticate.
+    _forward_env = {k: v for k, v in os.environ.items() if k.startswith(("E2B_", "HARBOR_"))}
     rollout_manager = RolloutManager.options(
         num_cpus=1,
         num_gpus=0,
+        runtime_env={"env_vars": _forward_env} if _forward_env else None,
     ).remote(args, pg)
 
     # calculate num_rollout from num_epoch

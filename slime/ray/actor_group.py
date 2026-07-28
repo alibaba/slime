@@ -60,12 +60,17 @@ class RayTrainGroup:
         }
 
         if self.args.offload_train and self.args.train_backend == "megatron":
+            import glob
+
             import torch_memory_saver
 
-            dynlib_path = os.path.join(
-                os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
-                "torch_memory_saver_hook_mode_preload.abi3.so",
-            )
+            tms_dir = os.path.dirname(os.path.dirname(torch_memory_saver.__file__))
+            # Newer torch_memory_saver appends a CUDA-version suffix to the preload lib name
+            # (e.g. torch_memory_saver_hook_mode_preload_cu12.abi3.so), so match by glob and
+            # prefer the exact legacy name when present.
+            candidates = [os.path.join(tms_dir, "torch_memory_saver_hook_mode_preload.abi3.so")]
+            candidates += sorted(glob.glob(os.path.join(tms_dir, "torch_memory_saver_hook_mode_preload*.abi3.so")))
+            dynlib_path = next((p for p in candidates if os.path.exists(p)), candidates[0])
             assert os.path.exists(dynlib_path), f"LD_PRELOAD so file {dynlib_path} does not exist."
 
             env_vars["LD_PRELOAD"] = dynlib_path

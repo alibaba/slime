@@ -4,6 +4,10 @@ FROM slimerl/slime:latest
 WORKDIR /root/slime
 
 RUN cd /root/Megatron-LM && pip install -e .
+# `pip install -e /root/Megatron-LM` does not register the `megatron` namespace here
+# (it resolves to dist-packages megatron-core only), so `megatron.training` is missing for
+# Ray worker actors. Add Megatron-LM to sys.path for ALL python processes via a .pth file.
+RUN echo /root/Megatron-LM > "$(python -c 'import site; print(site.getsitepackages()[0])')/zzz_megatron_lm.pth"
 
 # 清理原有的 slime 代码
 RUN rm -rf /root/slime/*

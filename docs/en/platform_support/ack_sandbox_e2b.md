@@ -1,159 +1,217 @@
-# Integrating slime with ACK Sandbox over the E2B protocol
+# Running slime RL with remote agents on ACK sandboxes (E2B)
 
-This guide explains how to run slime RL rollouts against sandboxes on Alibaba
-Cloud Container Service for Kubernetes (ACK), using the **E2B protocol** as the
-wire format between slime/Harbor and the cluster.
-
-The design is: **one common SandboxSet (a generic warm pool), and the
-instance-specific image is swapped in at claim time during RL training.** This
-avoids building a template per image / per task.
-
-There are two API planes:
-
-| Plane | API | When | Who |
-|-------|-----|------|-----|
-| Pool creation | Kubernetes sandbox CRD | once, before training | cluster admin |
-| Sandbox creation (+ image override) | E2B API | per sample, during rollout | slime → Harbor |
+This is a verified, end-to-end recipe for training with slime where each rollout runs a
+real coding **agent inside an ACK sandbox**, driven over the **E2B protocol**. The agent's
+LLM calls are routed through slime's TokenProxy to the SGLang engines, token-level data is
+captured, and a GRPO step trains on it.
 
 ```
- slime rollout ── Harbor ── E2B SDK ──► gateway ── k8s ──► claim from common SandboxSet
- (generate_with_harbor)     (E2B env)    (ack-sandbox-manager)   └─ per-claim image = task image
+ slime (train_remote_agent.py)
+   ├─ SGLang engines  ← TokenProxy (records token_ids/logprobs) ←─┐
+   ├─ Megatron actors (GRPO)                                       │ OpenAI API (base_url = TokenProxy)
+   └─ generate_with_harbor ─ harbor Trial ─ E2BEnvironment ─┐      │
+                                                            ▼      │
+                       ACK sandbox-manager (E2B API) ─ claims ─ Sandbox pod (agent runs here)
 ```
+
+Five things to prepare: **K8s**, **code (image)**, **model**, **data**, then **run**.
 
 ---
 
-## Prerequisites
+## 1. Kubernetes preparation
 
-### 1. A sandbox controller on ACK (choose one)
+### 1.1 Sandbox stack
+Install the ACK sandbox stack (OpenKruise `agents.kruise.io` CRDs + `ack-sandbox-manager` +
+`ack-sandbox-gateway`) in namespace `sandbox-system`. This exposes the two E2B endpoints slime uses:
 
-- **`ack-sandbox-controller` + `ack-sandbox-manager` (recommended)** — the ACK-native
-  stack; `ack-sandbox-manager` includes the E2B-compatible gateway.
-- **OpenKruise** — provides the `SandboxSet` / `SandboxClaim` / `Sandbox` CRDs
-  (`agents.kruise.io/v1alpha1`), which Harbor's `ACKEnvironment` targets directly.
+| Plane | Endpoint | Purpose |
+|-------|----------|---------|
+| Control | `http://sandbox-manager.sandbox-system:8080` | create/claim sandbox, templates |
+| Data | `http://sandbox-gateway.sandbox-system:7788` | envd exec/filesystem routing |
 
-Per-claim image override is supported by both (OpenKruise SandboxClaim
-`spec.inplaceUpdate.image`; the E2B gateway extension key
-`e2b.agents.kruise.io/image`).
+Get the E2B admin key from the manager (`--e2b-admin-key`); export it as `E2B_API_KEY` at run time.
 
-### 2. Per-instance images (harbor CLI)
+### 1.2 Image pull secret (for private task images)
+If your task images live in a private registry, create a `kubernetes.io/dockerconfigjson`
+secret in the namespace where sandboxes run, e.g. `acr-pro-registry`.
 
-Each task/instance needs its own container image, built and pushed to a registry
-the cluster can pull from. **Image preparation is covered in a separate
-document** — in brief, the harbor CLI builds from the task's Dockerfile (or a
-prebuilt `docker_image`) and pushes to your registry.
+### 1.3 SandboxSet pools (one per task image)
 
----
+> **Important:** per-claim image override (swapping a warm pod's image at claim time) is **not
+> reliable** on the current ACK controller — an in-place image update leaves the sandbox
+> `state=dead / InplaceUpdating` and the claim times out. So **bake the task image into the
+> SandboxSet** and use `override_claim_image=false`, i.e. **one SandboxSet per task image**, and
+> route each sample to its pool via prompt metadata (`sandbox_set_name`).
 
-## Step 1 — Create one common SandboxSet (before training)
-
-Create a single generic warm pool. Size `replicas` to your rollout concurrency.
-
-OpenKruise example:
+Each SandboxSet MUST:
+- set `spec.runtimes: [{name: agent-runtime}]` — this injects the E2B `envd` daemon (without it,
+  `AsyncSandbox.create` fails with `connection refused` on envd port 49983);
+- carry the image pull secret if the image is private;
+- run privileged (swe-bench images need it).
 
 ```yaml
 apiVersion: agents.kruise.io/v1alpha1
 kind: SandboxSet
 metadata:
-  name: slime-common-pool
-  namespace: my-namespace
+  name: slime-sbx-pallets-flask-5014   # DNS-safe; referenced from prompt metadata
+  namespace: default
 spec:
-  replicas: 32
+  replicas: 2                          # >= n_samples_per_prompt for this task
+  runtimes:
+  - name: agent-runtime                # injects envd
   template:
+    metadata:
+      labels: { app: sandbox }
     spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: acr-pro-registry
       containers:
-        - name: main
-          image: registry.cn-hangzhou.aliyuncs.com/my-repo/sandbox-base:latest  # generic
-          command: ["sleep", "infinity"]
-          securityContext: { privileged: true, runAsUser: 0 }
-          resources:
-            requests: { cpu: "2", memory: "4Gi" }
+      - name: main
+        command: ["sleep", "infinity"]
+        image: <registry>/swebench-verified/pallets-flask-5014:<tag>   # the task's image, baked in
+        imagePullPolicy: IfNotPresent
+        securityContext: { privileged: true, runAsUser: 0 }
+        resources:
+          requests: { cpu: "1", memory: 4Gi, ephemeral-storage: 10Gi }
 ```
 
 ```bash
-kubectl apply -f sandboxset.yaml
-kubectl get sandboxset -n my-namespace
+kubectl apply -f sandboxset-<instance>.yaml
+kubectl get sandboxset -n default          # AVAILABLE should reach REPLICAS
 ```
 
-(For `ack-sandbox-controller`, create the equivalent template via its CRD — see
-its docs.)
+### 1.4 Ray cluster
+Run slime on a Ray cluster (e.g. a KubeRay `RayCluster`) whose head pod has the GPUs and the
+workspace image from step 2. The head pod's IP must be reachable from the sandbox pods (same
+cluster network) — it is passed to the agent as `--harbor-proxy-host` so the in-sandbox agent
+can reach the TokenProxy.
 
 ---
 
-## Step 2 — Put each instance's image in its `task.toml`
+## 2. Code preparation (build the workspace image)
 
-Each task carries its image under `[environment]`:
+Build the workspace image from `docker/Dockerfile.workspace`. It bakes in: the slime code
+(this branch), Megatron-LM on `sys.path`, and harbor with ACK/E2B support:
 
-```toml
-[environment]
-docker_image = "registry.cn-hangzhou.aliyuncs.com/my-repo/sympy-12096:latest"
-cpus = 2
-memory_mb = 4096
-```
-
-Harbor reads this per task and uses it as the **per-claim image override** against
-the common SandboxSet — no per-image template build.
-
----
-
-## Step 3 — Run training through the Harbor path
-
-slime's Harbor integration (`slime/rollout/remote_agent/`) drives Harbor, which
-creates the sandbox and applies the image override.
-
-```bash
-python train_remote_agent.py \
-  --custom-generate-function-path slime.rollout.remote_agent.generate.generate_with_harbor \
-  --harbor-use-local-trial \
-  --harbor-agent-name swe-agent \
-  --harbor-model-name openai/qwen \
-  --harbor-env-import-path harbor.environments.e2b:E2BEnvironment \
-  --harbor-env-kwargs '{"sandbox_set_name": "slime-common-pool"}' \
-  --harbor-task-path-template '/home/slime/dataset-tasks/{instance_id}' \
-  --hf-checkpoint /path/to/model
-```
-
-- `--harbor-env-kwargs '{"sandbox_set_name": "slime-common-pool"}'` selects the
-  common pool. Harbor's `E2BEnvironment` claims from it and passes the task's
-  `docker_image` via the gateway key `e2b.agents.kruise.io/image` (per-claim
-  image override). Use `harbor.environments.ack:ACKEnvironment` to talk to the
-  OpenKruise CRDs directly instead (image override via `spec.inplaceUpdate.image`).
-- Harbor-side controls (see harbor `E2BEnvironment` / `ACKEnvironment`):
-  `sandbox_set_name` (common pool), `override_claim_image` (default `true`).
-
-### Optional: per-task pool routing by size class
-
-If you later split the pool by pod size, tag each `task.toml` with a class and
-let slime resolve it to a SandboxSet name per task:
-
-```toml
-[metadata]
-sandbox_class = "large"
+```dockerfile
+# harbor with ACK sandbox + E2B support (sandbox_set_name / override_claim_image, skips the
+# ACK-unsupported template build, per-claim image key). Pulls e2b SDK, litellm, etc.
+RUN git clone --depth 1 -b feat/ack-sandbox-image-override \
+        https://github.com/alibaba/harbor.git /root/harbor && \
+    pip install -e /root/harbor && \
+    pip install kubernetes_asyncio
 ```
 
 ```bash
-  --harbor-sandbox-class-key sandbox_class \
-  --harbor-sandbox-set-name-template 'slime-pool-{sandbox_class}' \
-  --harbor-sandbox-set-key sandbox_set_name
+docker build -f docker/Dockerfile.workspace -t <registry>/dev/slime:<tag> .
+docker push <registry>/dev/slime:<tag>
+# point the RayCluster head at this image and (re)create the head pod
 ```
 
-slime's `generate_with_harbor` reads the class (sample metadata or `task.toml`),
-converts it via the template, and injects it into `environment_kwargs`. With a
-single common pool this is unnecessary — a static `--harbor-env-kwargs` suffices.
+This branch also contains the slime fixes required for the newer base image (SGLang 0.5.15 /
+recent Megatron) and for correct token capture — no runtime patching is needed once the image
+is built:
+- `model_provider` / freeze wrapper accept Megatron's `config` / `pg_collection`;
+- HF/SGLang arg-validation tolerant of renamed args;
+- `torch_memory_saver` preload lib located by glob;
+- E2B/HARBOR env vars forwarded into the RolloutManager actor;
+- `apply_chat_template` outputs coerced to `list[int]` in the proxy and the token reconstruction.
 
 ---
 
-## Checklist
+## 3. Model preparation
 
-| Step | Plane | How |
-|------|-------|-----|
-| 1. Sandbox controller on ACK | k8s | ack-sandbox-manager (gateway) or OpenKruise |
-| 2. One common SandboxSet | k8s | `kubectl apply` |
-| 3. Per-instance images | — | harbor CLI (separate doc) |
-| 4. `docker_image` in each `task.toml` | dataset | `[environment] docker_image` |
-| 5. Run training | slime | `generate_with_harbor` + `--harbor-env-kwargs {"sandbox_set_name": ...}` |
+Download the HF checkpoint (used for the tokenizer, SGLang, and as the conversion source), then
+convert to a Megatron `torch_dist` checkpoint for `--ref-load`:
 
-**Mental model:** create the pool once; at rollout time each claim overrides the
-image with the task's own image, so a single common SandboxSet serves every
-instance.
+```bash
+# 1. HF checkpoint (e.g. via hf / modelscope)
+hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir /root/Qwen2.5-0.5B-Instruct
 
-> Note: Harbor-driven sandbox creation is experimental and may change.
+# 2. HF -> torch_dist (put the output on a durable volume so it survives pod restarts)
+cd /root/slime
+source scripts/models/qwen2.5-0.5B.sh
+PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py "${MODEL_ARGS[@]}" \
+    --hf-checkpoint /root/Qwen2.5-0.5B-Instruct \
+    --save /var/model/Qwen2.5-0.5B_torch_dist
+```
+
+Use a matching `scripts/models/*.sh` preset for other sizes (e.g. `qwen2.5-7B.sh`). Note TP must
+divide `num_query_groups` (2 for Qwen2.5), so `--tensor-model-parallel-size` ≤ 2 for these models.
+
+---
+
+## 4. Data preparation
+
+### 4.1 Task directories
+slime resolves each sample to a harbor task dir via `--harbor-task-path-template`. swe-bench
+tasks (each with `task.toml`, `environment/Dockerfile`, `solution/`, `tests/`) live at e.g.
+`/var/model-dataset/swe-bench-verified/{instance_id}`.
+
+### 4.2 Prompts (`prompts.jsonl`)
+One JSON object per line. `task_name` selects the task dir; `metadata.sandbox_set_name` routes
+the sample to its baked SandboxSet:
+
+```json
+{"prompt": "<problem statement>", "task_name": "pallets__flask-5014", "metadata": {"sandbox_set_name": "slime-sbx-pallets-flask-5014"}}
+{"prompt": "<problem statement>", "task_name": "astropy__astropy-14309", "metadata": {"sandbox_set_name": "slime-sbx-astropy-14309"}}
+```
+
+Run with `--input-key prompt`. slime merges top-level fields (`task_name`, ...) into
+`sample.metadata`, and `generate_with_harbor` reads `metadata.sandbox_set_name` first when
+resolving the pool.
+
+---
+
+## 5. Run
+
+```bash
+export E2B_API_KEY=<ACK sandbox admin key>
+bash examples/remote_agent/run_swebench_e2b.sh
+```
+
+`examples/remote_agent/run_swebench_e2b.sh` sets the required env and flags. The essential ones:
+
+| Flag / env | Value | Why |
+|------------|-------|-----|
+| `E2B_API_URL` | `http://sandbox-manager.sandbox-system:8080` | E2B control plane |
+| `E2B_SANDBOX_URL` | `http://sandbox-gateway.sandbox-system:7788` | E2B data plane (router) |
+| `E2B_VALIDATE_API_KEY` | `false` | skip client-side key format check |
+| `--harbor-use-local-trial` | — | run the harbor Trial in-process |
+| `--harbor-env-import-path` | `harbor.environments.e2b:E2BEnvironment` | use the E2B env |
+| `--harbor-env-kwargs` | `{"override_claim_image": false}` | use the baked pool image (no in-place override) |
+| `--harbor-proxy-host` | **head pod IP** (not `0.0.0.0`) | so the in-sandbox agent can reach the TokenProxy |
+| `--harbor-agent-name` | `swe-agent` | built-in SWE-agent |
+| `--sglang-disable-cuda-graph` | — | SGLang 0.5.15 prefill CUDA graph is incompatible with slime's memory-saver mode |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | required for tensor parallelism |
+
+---
+
+## 6. What success looks like
+
+In the run log you should see, per sample, real token capture and a GRPO step:
+
+```
+[Harbor][...] Reconstructed sample: response_len=976, num_tokens=1026
+rollout.py: perf 0: {'rollout/response_len/mean': ~1000, ...}
+model.py:  step 0: {'train/loss': ..., 'train/entropy_loss': 2.10,
+                    'train/train_rollout_logprob_abs_diff': 0.80, ...}
+```
+
+Nonzero `entropy_loss` / `train_rollout_logprob_abs_diff` mean the actor ran a real forward pass
+over the reconstructed tokens. With a tiny model that solves no task, all rewards are `0` so the
+GRPO advantage (and `grad_norm`) is `0` — use a stronger model, solvable tasks, or a shaped
+reward to get a learning signal.
+
+---
+
+## 7. Notes & sizing
+
+- **One pool per image, `override_claim_image=false`.** Per-claim image override is broken on the
+  current ACK controller (tracked upstream in `openkruise/agents`); revisit once fixed.
+- **Memory.** Colocated Megatron + SGLang on one node is memory-hungry; a full 3B/7B run can OOM a
+  200 GiB pod during startup. Start small (0.5B), lower `--sglang-mem-fraction-static`, and keep
+  the `--ref-load` checkpoint on a durable volume so a restart doesn't force reconversion.
+- **Agent cost limits.** `--harbor-agent-kwargs '{"total_cost_limit":0,...}'` is fine — SWE-agent
+  treats `0` as *unlimited*, not "no budget".

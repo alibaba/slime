@@ -56,7 +56,9 @@ def _hf_validate_args(args, hf_config):
         ("tie_word_embeddings", "untie_embeddings_and_output_weights", lambda x, y: not x == y),
         ("rms_norm_eps", "norm_epsilon", equal),
     ]:
-        if hasattr(hf_config, hf_config_name):
+        # Skip when the Megatron arg name isn't present (arg-name drift across Megatron
+        # versions, e.g. norm_epsilon); the value is still supplied to the model builder.
+        if hasattr(hf_config, hf_config_name) and hasattr(args, megatron_config_name):
             if not compare_fn(getattr(hf_config, hf_config_name), getattr(args, megatron_config_name)):
                 errors.append(
                     f"{hf_config_name} in hf config {getattr(hf_config, hf_config_name)} is not equal to "

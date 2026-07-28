@@ -118,7 +118,14 @@ def get_model_provider_func(
 
         return provider.provide
 
-    def model_provider(pre_process: bool = True, post_process: bool = True, vp_stage: int | None = None) -> GPTModel:
+    def model_provider(
+        pre_process: bool = True,
+        post_process: bool = True,
+        vp_stage: int | None = None,
+        config: TransformerConfig | None = None,
+        pg_collection=None,
+        **kwargs,
+    ) -> GPTModel:
         """Builds the model.
 
         If you set the use_legacy_models to True, it will return the legacy GPT model and if not the mcore GPT model.
@@ -126,6 +133,10 @@ def get_model_provider_func(
         Args:
             pre_process (bool, optional): Set to true if you need to compute embedings. Defaults to True.
             post_process (bool, optional): Set to true if you need to want to compute output logits/loss. Defaults to True.
+            config: optional TransformerConfig. Newer Megatron's ``get_model`` builds the config and
+                passes it (together with ``pg_collection``) into the provider; older versions do not.
+                When not supplied we fall back to building it from args.
+            pg_collection: optional process-group collection injected by newer Megatron ``get_model``.
 
 
         Returns:
@@ -133,8 +144,10 @@ def get_model_provider_func(
         """
         use_te = args.transformer_impl == "transformer_engine"
 
-        # Experimental loading arguments from yaml
-        config: TransformerConfig = core_transformer_config_from_args(args)
+        # Experimental loading arguments from yaml. Prefer the config Megatron built for us
+        # (newer versions pass it in); otherwise build it from args for backward compatibility.
+        if config is None:
+            config = core_transformer_config_from_args(args)
 
         if args.spec is not None:
             transformer_layer_spec = import_module(args.spec)
@@ -215,6 +228,11 @@ def get_model_provider_func(
         if vp_stage is not None:
             kwargs["vp_stage"] = vp_stage
 
+        # Newer Megatron builds process groups outside the provider and injects them; forward
+        # them to GPTModel (which accepts pg_collection). Older Megatron doesn't pass this.
+        if pg_collection is not None:
+            kwargs["pg_collection"] = pg_collection
+
         if args.mtp_num_layers:
             from megatron.core.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec
 
@@ -239,12 +257,19 @@ def get_model_provider_func(
 
 
 def wrap_model_provider_with_freeze(original_provider, args):
-    def wrapped_provider(pre_process=True, post_process=True, vp_stage=None):
+    def wrapped_provider(pre_process=True, post_process=True, vp_stage=None, **extra):
         sig = inspect.signature(original_provider)
-        if "vp_stage" in sig.parameters:
-            model = original_provider(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
-        else:
-            model = original_provider(pre_process=pre_process, post_process=post_process)
+        params = sig.parameters
+        accepts_var_kw = any(p.kind == p.VAR_KEYWORD for p in params.values())
+        call_kwargs = {"pre_process": pre_process, "post_process": post_process}
+        if "vp_stage" in params or accepts_var_kw:
+            call_kwargs["vp_stage"] = vp_stage
+        # Forward config / pg_collection (injected by newer Megatron's get_model) when the
+        # underlying provider can accept them.
+        for k, v in extra.items():
+            if accepts_var_kw or k in params:
+                call_kwargs[k] = v
+        model = original_provider(**call_kwargs)
 
         freeze_model_params(model, args)
 

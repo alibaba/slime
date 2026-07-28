@@ -524,6 +524,20 @@ def _reconstruct_output(
     sample.metadata["prompt_length"] = len(prompt_ids)
 
 
+def _as_token_ids(tokenized) -> list[int]:
+    """Coerce ``apply_chat_template`` output to a flat ``list[int]``.
+
+    Newer transformers may return a ``BatchEncoding`` (dict-like) or a tensor instead of a
+    plain list. Iterating a ``BatchEncoding`` yields its string keys ("input_ids", ...),
+    which would corrupt the token stream, so normalize here.
+    """
+    if hasattr(tokenized, "input_ids"):
+        tokenized = tokenized["input_ids"]
+    if hasattr(tokenized, "tolist"):
+        tokenized = tokenized.tolist()
+    return tokenized
+
+
 def _tokenize_messages(
     messages: list[dict], tokenizer
 ) -> list[int]:
@@ -542,8 +556,10 @@ def _tokenize_messages(
             msg["content"] = "\n".join(text_parts) if text_parts else ""
         normalized.append(msg)
 
-    return tokenizer.apply_chat_template(
-        normalized, add_generation_prompt=False, tokenize=True
+    return _as_token_ids(
+        tokenizer.apply_chat_template(
+            normalized, add_generation_prompt=False, tokenize=True
+        )
     )
 
 
@@ -563,8 +579,10 @@ def _tokenize_prompt(sample: Sample, tokenizer) -> list[int]:
         return tokenizer.encode(prompt, add_special_tokens=False)
     elif isinstance(prompt, list):
         # Chat format (list of messages)
-        return tokenizer.apply_chat_template(
-            prompt, add_generation_prompt=True, tokenize=True
+        return _as_token_ids(
+            tokenizer.apply_chat_template(
+                prompt, add_generation_prompt=True, tokenize=True
+            )
         )
     return []
 
