@@ -394,6 +394,8 @@ async def _submit_with_retry(
                     if environment_kwargs is not None
                     else dict(getattr(args, "harbor_env_kwargs", {}) or {})
                 ),
+                job_id=getattr(args, "wandb_group", None) or "slime-rl",
+                task_id=trial_id,
             )
 
             if result.status == "completed":
