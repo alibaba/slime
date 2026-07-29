@@ -164,27 +164,56 @@ resolving the pool.
 
 ---
 
-## 5. Run
+## 5. Run — two modes
+
+The agent always runs inside an ACK sandbox and always calls slime's TokenProxy for its LLM
+(so token capture is identical). What differs is **who drives the harbor Trial and the sandbox
+lifecycle**:
+
+| | A. In-process (non-kube-rl) | B. Remote via kube-rl server |
+|---|---|---|
+| mode flag | `--harbor-use-local-trial` | `--harbor-server-url http://kube-rl.<ns>:8080` (drop local-trial) |
+| Trial + sandbox | run inside slime's RolloutManager actor | run by the **kube-rl worker** |
+| E2B creds on slime side | required (`E2B_API_KEY/API_URL/SANDBOX_URL`) | **not needed** (kube-rl holds them) |
+| `--harbor-env-import-path` | `harbor.environments.e2b:E2BEnvironment` | ignored (env type is server-configured) |
+| retries | none | `--harbor-max-retries N` (HTTP submit backoff) |
+| harbor in the slime image | required | not required (HTTP only) |
+| token capture | slime TokenProxy | slime TokenProxy (same) |
+
+Both modes need: `--harbor-proxy-host <head-pod-IP>` (**not** `0.0.0.0`, so the in-sandbox agent can
+reach the TokenProxy), `--harbor-env-kwargs '{"override_claim_image": false}'`, a per-sample
+`metadata.sandbox_set_name`, `--sglang-disable-cuda-graph`, and `CUDA_DEVICE_MAX_CONNECTIONS=1`.
+
+### A. In-process (non-kube-rl) — slime creates the sandbox directly
 
 ```bash
 export E2B_API_KEY=<ACK sandbox admin key>
 bash examples/remote_agent/run_swebench_e2b.sh
 ```
 
-`examples/remote_agent/run_swebench_e2b.sh` sets the required env and flags. The essential ones:
+`run_swebench_e2b.sh` sets `E2B_API_URL=http://sandbox-manager.sandbox-system:8080` (control),
+`E2B_SANDBOX_URL=http://sandbox-gateway.sandbox-system:7788` (data), `E2B_VALIDATE_API_KEY=false`,
+and `--harbor-use-local-trial` / `--harbor-env-import-path harbor.environments.e2b:E2BEnvironment`.
 
-| Flag / env | Value | Why |
-|------------|-------|-----|
-| `E2B_API_URL` | `http://sandbox-manager.sandbox-system:8080` | E2B control plane |
-| `E2B_SANDBOX_URL` | `http://sandbox-gateway.sandbox-system:7788` | E2B data plane (router) |
-| `E2B_VALIDATE_API_KEY` | `false` | skip client-side key format check |
-| `--harbor-use-local-trial` | — | run the harbor Trial in-process |
-| `--harbor-env-import-path` | `harbor.environments.e2b:E2BEnvironment` | use the E2B env |
-| `--harbor-env-kwargs` | `{"override_claim_image": false}` | use the baked pool image (no in-place override) |
-| `--harbor-proxy-host` | **head pod IP** (not `0.0.0.0`) | so the in-sandbox agent can reach the TokenProxy |
-| `--harbor-agent-name` | `swe-agent` | built-in SWE-agent |
-| `--sglang-disable-cuda-graph` | — | SGLang 0.5.15 prefill CUDA graph is incompatible with slime's memory-saver mode |
-| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | required for tensor parallelism |
+### B. Remote via kube-rl server — kube-rl runs the agent
+
+Point slime at the in-cluster kube-rl server (it must itself be on the E2B environment — verify
+`GET http://kube-rl.<ns>:8080/api/v1/capabilities/environments` shows
+`harbor.environments.e2b:E2BEnvironment`):
+
+```bash
+# no E2B_* needed on the slime side — kube-rl holds the sandbox credentials
+bash examples/remote_agent/run_swebench_e2b_remote.sh
+```
+
+`run_swebench_e2b_remote.sh` drops `--harbor-use-local-trial` and instead sets
+`--harbor-server-url http://kube-rl.kube-rl.svc.cluster.local:8080` + `--harbor-max-retries 3`.
+Per sample, slime POSTs `multipart/form-data` to `/api/v1/runs` — `metadata` is a JSON
+`AgentRunRequest` (`job_id`, `task_id`, `task_path` = the tar-relative dir name,
+`agent.llm_proxy_url` = the TokenProxy, `environment_kwargs.sandbox_set_name`) and `task_archive`
+is a tar of the task dir. The kube-rl worker claims a sandbox from that pool and runs the agent;
+the agent's LLM calls flow back to slime's TokenProxy, and slime reconstructs tokens from the
+proxy session (it does not rely on the server's response).
 
 ---
 

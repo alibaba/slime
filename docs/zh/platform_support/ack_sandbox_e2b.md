@@ -157,27 +157,54 @@ SandboxSet：
 
 ---
 
-## 5. 运行
+## 5. 运行 —— 两种模式
+
+agent 始终跑在 ACK sandbox 里、始终调 slime 的 TokenProxy 采集 token（采集方式一致）。区别只在
+**由谁驱动 harbor Trial 与 sandbox 生命周期**：
+
+| | A. 进程内（非 kube-rl） | B. 经 kube-rl server 远程 |
+|---|---|---|
+| 模式开关 | `--harbor-use-local-trial` | `--harbor-server-url http://kube-rl.<ns>:8080`（去掉 local-trial） |
+| Trial + sandbox | 在 slime 的 RolloutManager actor 内跑 | 由 **kube-rl worker** 跑 |
+| slime 侧 E2B 凭证 | 需要（`E2B_API_KEY/API_URL/SANDBOX_URL`） | **不需要**（凭证在 kube-rl） |
+| `--harbor-env-import-path` | `harbor.environments.e2b:E2BEnvironment` | 忽略（环境类型由服务端配置） |
+| 重试 | 无 | `--harbor-max-retries N`（HTTP 提交退避重试） |
+| slime 镜像是否需 harbor | 需要 | 不需要（纯 HTTP） |
+| token 采集 | slime TokenProxy | slime TokenProxy（同） |
+
+两种模式都需要：`--harbor-proxy-host <head-pod-IP>`（**不能**是 `0.0.0.0`，否则 sandbox 内 agent
+连不到 TokenProxy）、`--harbor-env-kwargs '{"override_claim_image": false}'`、每条 prompt 的
+`metadata.sandbox_set_name`、`--sglang-disable-cuda-graph`、`CUDA_DEVICE_MAX_CONNECTIONS=1`。
+
+### A. 进程内（非 kube-rl）—— slime 直接创建 sandbox
 
 ```bash
 export E2B_API_KEY=<ACK sandbox admin key>
 bash examples/remote_agent/run_swebench_e2b.sh
 ```
 
-`examples/remote_agent/run_swebench_e2b.sh` 已设置所需环境与参数，关键项：
+`run_swebench_e2b.sh` 设置 `E2B_API_URL=http://sandbox-manager.sandbox-system:8080`（控制面）、
+`E2B_SANDBOX_URL=http://sandbox-gateway.sandbox-system:7788`（数据面）、`E2B_VALIDATE_API_KEY=false`，
+以及 `--harbor-use-local-trial` / `--harbor-env-import-path harbor.environments.e2b:E2BEnvironment`。
 
-| 参数 / 环境变量 | 取值 | 说明 |
-|------------|-------|-----|
-| `E2B_API_URL` | `http://sandbox-manager.sandbox-system:8080` | E2B 控制面 |
-| `E2B_SANDBOX_URL` | `http://sandbox-gateway.sandbox-system:7788` | E2B 数据面（router） |
-| `E2B_VALIDATE_API_KEY` | `false` | 跳过客户端 key 格式校验 |
-| `--harbor-use-local-trial` | — | 进程内运行 harbor Trial |
-| `--harbor-env-import-path` | `harbor.environments.e2b:E2BEnvironment` | 使用 E2B 环境 |
-| `--harbor-env-kwargs` | `{"override_claim_image": false}` | 使用烘入的池镜像（不做 in-place 覆盖） |
-| `--harbor-proxy-host` | **head pod IP**（不是 `0.0.0.0`） | 使 sandbox 内 agent 能访问 TokenProxy |
-| `--harbor-agent-name` | `swe-agent` | 内置 SWE-agent |
-| `--sglang-disable-cuda-graph` | — | SGLang 0.5.15 的 prefill CUDA graph 与 slime memory-saver 不兼容 |
-| `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | 张量并行必需 |
+### B. 经 kube-rl server 远程 —— 由 kube-rl 跑 agent
+
+把 slime 指向集群内的 kube-rl server（该 server 本身必须在 E2B 环境上 —— 用
+`GET http://kube-rl.<ns>:8080/api/v1/capabilities/environments` 确认 `importPath` 为
+`harbor.environments.e2b:E2BEnvironment`）：
+
+```bash
+# slime 侧无需任何 E2B_* —— sandbox 凭证在 kube-rl
+bash examples/remote_agent/run_swebench_e2b_remote.sh
+```
+
+`run_swebench_e2b_remote.sh` 去掉 `--harbor-use-local-trial`，改用
+`--harbor-server-url http://kube-rl.kube-rl.svc.cluster.local:8080` + `--harbor-max-retries 3`。
+每条样本 slime 向 `/api/v1/runs` POST `multipart/form-data`：`metadata` 是 JSON `AgentRunRequest`
+（`job_id`、`task_id`、`task_path`=tar 内相对目录名、`agent.llm_proxy_url`=TokenProxy、
+`environment_kwargs.sandbox_set_name`），`task_archive` 是 task 目录的 tar。kube-rl worker 从该池
+claim 一个 sandbox 跑 agent；agent 的 LLM 调用回流到 slime 的 TokenProxy，slime 从 proxy session
+重建 token（不依赖 server 的响应）。
 
 ---
 
