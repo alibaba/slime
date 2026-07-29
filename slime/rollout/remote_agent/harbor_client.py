@@ -139,6 +139,8 @@ class HarborClient:
         environment_overrides: dict[str, Any] | None = None,
         environment_kwargs: dict[str, Any] | None = None,
         timeout_multiplier: float = 1.0,
+        job_id: str = "slime-rl",
+        task_id: str | None = None,
     ) -> HarborRunResult:
         """Submit an agent run and block until the result is available.
 
@@ -158,6 +160,22 @@ class HarborClient:
         """
         verifier = verifier or HarborVerifierConfig()
 
+        # Archive the local task directory first so we can send the tar-relative
+        # directory name as task_path. The server unpacks the archive and resolves
+        # task_path against its own workdir, so an absolute client-side path would
+        # not exist there.
+        try:
+            archive_bytes, dir_name = await asyncio.to_thread(
+                _create_task_archive, task_path
+            )
+        except FileNotFoundError as e:
+            return HarborRunResult(
+                run_id="",
+                status="error",
+                rewards={"reward": 0.0},
+                error_message=str(e),
+            )
+
         # Build agent dict (strip empty values)
         agent_dict = {}
         if agent.name is not None:
@@ -171,8 +189,11 @@ class HarborClient:
         if agent.kwargs:
             agent_dict["kwargs"] = agent.kwargs
 
+        # job_id/task_id are required by the server's AgentRunRequest.
         payload = {
-            "task_path": task_path,
+            "job_id": job_id,
+            "task_id": task_id or dir_name,
+            "task_path": dir_name,
             "agent": agent_dict,
             "timeout_multiplier": timeout_multiplier,
             "verifier": {"disable": verifier.disable},
@@ -181,19 +202,6 @@ class HarborClient:
             payload["environment_overrides"] = environment_overrides
         if environment_kwargs:
             payload["environment_kwargs"] = environment_kwargs
-
-        # Archive the local task directory
-        try:
-            archive_bytes, _dir_name = await asyncio.to_thread(
-                _create_task_archive, task_path
-            )
-        except FileNotFoundError as e:
-            return HarborRunResult(
-                run_id="",
-                status="error",
-                rewards={"reward": 0.0},
-                error_message=str(e),
-            )
 
         url = f"{self.server_url}/api/v1/runs"
         logger.info("Submitting Harbor run to %s task=%s", url, task_path)
