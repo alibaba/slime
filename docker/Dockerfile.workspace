@@ -1,4 +1,4 @@
-FROM slimerl/slime:latest
+FROM slimerl/slime:nightly-dev-20260804a
 
 # 设置工作目录
 WORKDIR /root/slime
