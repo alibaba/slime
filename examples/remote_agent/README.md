@@ -2,8 +2,14 @@
 
 This example demonstrates how to run Slime training with agents executed
 on a remote [Harbor](https://github.com/agent-arena/harbor) server, or
-locally via in-process Trial execution.  In both modes the TokenProxy
-captures token-level data (token_ids, logprobs) for RL training.
+locally via in-process Trial execution.  In both modes an in-process
+`OpenAIAdapter` captures token-level data (token_ids, logprobs) for RL training.
+
+The adapter runs inside the `RolloutManager` actor (where `generate_with_harbor`
+executes), so every concurrent trial shares one adapter endpoint and token
+capture happens in-process — no separate proxy actor and no post-hoc token
+reconstruction. The adapter reaches the SGLang engines through the sglang
+router (`--sglang-router-ip/-port`, started automatically by slime).
 
 ## Architecture
 
@@ -19,11 +25,10 @@ Slime Ray Cluster                              Harbor Server (remote)
 │                   │          │              │    └── run Agent     │
 │                   ▼          │              └──────────┬───────────┘
 │  ┌──────────────────────┐   │                         │
-│  │  TokenProxy          │   │   OpenAI SDK            │
-│  │  (Ray Named Actor)   │◀──┼───(base_url)────────────┘
-│  │  FastAPI + LiteLLM   │   │
-│  │  → SGLang Ray RPC    │   │
-│  │  → SessionRecorder   │   │
+│  │  OpenAIAdapter       │   │   OpenAI SDK            │
+│  │  (in-process, aiohttp)│◀─┼───(base_url,Bearer sid)─┘
+│  │  + TrajectoryManager │   │
+│  │  → sglang router HTTP│   │
 │  └──────────────────────┘   │
 └──────────────────────────────┘
 ```
@@ -40,11 +45,10 @@ Slime Ray Cluster
 │                   │          │
 │                   ▼          │
 │  ┌──────────────────────┐   │
-│  │  TokenProxy          │   │
-│  │  (Ray Named Actor)   │   │
-│  │  FastAPI + LiteLLM   │   │
-│  │  → SGLang Ray RPC    │   │
-│  │  → SessionRecorder   │   │
+│  │  OpenAIAdapter       │   │
+│  │  (in-process, aiohttp)│  │
+│  │  + TrajectoryManager │   │
+│  │  → sglang router HTTP│   │
 │  └──────────┬───────────┘   │
 │             │ OpenAI SDK    │
 │             ▼               │
@@ -101,11 +105,11 @@ python train_remote_agent.py \
 | `--harbor-env-import-path` | `harbor.environments.local_docker:LocalDockerEnvironment` | Environment class import path |
 | `--harbor-env-kwargs` | `{}` | JSON dict of environment kwargs |
 | `--harbor-task-path-template` | `/home/slime/dataset-tasks/{instance_id}` | Task directory template |
-| `--harbor-proxy-host` | `0.0.0.0` | Bind host for the LLM proxy (remote mode only) |
-| `--harbor-proxy-port` | `0` | Proxy port, 0 = auto-select (remote mode only) |
+| `--harbor-adapter-bind-host` | `0.0.0.0` | Bind host for the in-process OpenAI adapter |
+| `--harbor-adapter-port` | `18001` | Fixed adapter port (avoid the router's 3000-4000 range; 0 = auto) |
+| `--harbor-adapter-public-host` | `None` | Head-node address the sandbox uses to reach the adapter (falls back to `LOCAL_IP`) |
 | `--harbor-max-retries` | `3` | Max retry attempts on failure (remote mode only) |
 | `--harbor-retry-base-delay` | `2.0` | Base delay (seconds) for exponential backoff (remote mode only) |
-| `--harbor-disable-reconstruct` | `False` | Disable token reconstruction from proxy |
 | `--harbor-use-local-trial` | `False` | **Run Trial locally instead of remote Harbor** |
 
 ### Remote Mode Only Parameters
@@ -117,22 +121,27 @@ python train_remote_agent.py \
 
 ## How It Works
 
-1. **Proxy startup**: `train_remote_agent.py` starts a `TokenProxy` as a Ray Named Actor after
-   creating the rollout manager. The proxy holds SGLang engine handles and runs
-   a FastAPI + LiteLLM server.
+1. **Adapter startup**: `generate_with_harbor` lazily starts an `OpenAIAdapter`
+   (aiohttp) inside the `RolloutManager` actor on the first call, bound to a
+   fixed port (`--harbor-adapter-port`) on the head node. It reads the sglang
+   router address from `args.sglang_router_ip/port` (started automatically by
+   slime in the same process).
 
 2. **Generate function**: `generate_with_harbor` replaces the default generate
    function. For each sample:
-   - Creates a `trial_id` and registers a session with the proxy
-   - Builds the agent's `base_url` pointing to the proxy
-   - **Remote mode**: Submits the task to Harbor HTTP server and waits for completion (with retry)
+   - Opens an adapter session keyed by the sample's `session_id` (`sid`)
+   - Points the agent at the adapter via `OPENAI_BASE_URL`, carrying the `sid`
+     as `OPENAI_API_KEY` (Bearer)
+   - **Remote mode**: Submits the task to the Harbor HTTP server and waits for completion (with retry)
    - **Local mode**: Runs `harbor.trial.trial.Trial` directly in the current process
-   - Reconstructs `Sample.tokens`, `Sample.rollout_log_probs`, and
-     `Sample.loss_mask` from the proxy's session recording
+   - Calls `finish_session(sid)` to drain the captured trajectory into training
+     `Sample` objects (tokens, `rollout_log_probs`, `loss_mask`)
 
-3. **Token reconstruction**: LLM-generated tokens get `mask=1` (participate in
-   loss), while tool/user replies get `mask=0` (masked out). This is the key
-   to RL training with multi-turn agents.
+3. **Token capture**: each turn's messages are rendered to token ids and sent to
+   sglang `/generate`; the `TrajectoryManager` records exact `output_ids` and
+   logprobs. Generated tokens get `mask=1` (participate in loss), while prompt /
+   tool / user context gets `mask=0`. This is the key to RL training with
+   multi-turn agents.
 
 ## Mode Comparison
 

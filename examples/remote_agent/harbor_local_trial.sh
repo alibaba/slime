@@ -60,7 +60,7 @@ python train_remote_agent.py ${MODEL_ARGS[@]} \
   --harbor-agent-kwargs '{"total_cost_limit": 0, "per_instance_cost_limit": 0}' \
   --harbor-env-import-path "$HARBOR_ENV_IMPORT_PATH" \
   --harbor-env-kwargs "$REMOTE_AGENT_ENVIRONMENT_KWARGS" \
-  --harbor-proxy-host "$HARBOR_PROXY_HOST" \
+  --harbor-adapter-public-host "$HARBOR_PROXY_HOST" \
   --hf-checkpoint "$HF_CHECKPOINT" \
   --load "$MEGATRON_CHECKPOINT" \
   --save "$MEGATRON_CHECKPOINT" \

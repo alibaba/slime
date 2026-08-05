@@ -1,13 +1,13 @@
 # 在 ACK sandbox 上运行 slime 远程 agent 强化学习（E2B）
 
 这是一份经过实测、可端到端跑通的流程：每次 rollout 在 **ACK sandbox 内运行真实的编码 agent**，
-通过 **E2B 协议** 驱动；agent 的 LLM 调用经 slime 的 TokenProxy 路由到 SGLang 引擎，采集 token 级
+通过 **E2B 协议** 驱动；agent 的 LLM 调用经 slime 的 OpenAI adapter 路由到 SGLang 引擎，采集 token 级
 数据后用 GRPO 训练。
 
 ```
  slime (train_remote_agent.py)
-   ├─ SGLang 引擎    ← TokenProxy（记录 token_ids/logprobs） ←─┐
-   ├─ Megatron actors (GRPO)                                   │ OpenAI API（base_url = TokenProxy）
+   ├─ SGLang 引擎    ← OpenAI adapter（记录 token_ids/logprobs） ←─┐
+   ├─ Megatron actors (GRPO)                                   │ OpenAI API（base_url = OpenAI adapter）
    └─ generate_with_harbor ─ harbor Trial ─ E2BEnvironment ─┐  │
                                                             ▼  │
                     ACK sandbox-manager（E2B API） ─ claim ─ Sandbox pod（agent 在此运行）
@@ -80,8 +80,8 @@ kubectl get sandboxset -n default          # AVAILABLE 达到 REPLICAS
 
 ### 1.4 Ray 集群
 在 Ray 集群（如 KubeRay `RayCluster`）上运行 slime，head pod 拥有 GPU 并使用第 2 步的镜像。
-head pod 的 IP 必须能被 sandbox pod 访问（同集群网络）—— 它会作为 `--harbor-proxy-host` 传给
-agent，使 sandbox 内的 agent 能访问 TokenProxy。
+head pod 的 IP 必须能被 sandbox pod 访问（同集群网络）—— 它会作为 `--harbor-adapter-public-host` 传给
+agent，使 sandbox 内的 agent 能访问 OpenAI adapter。
 
 ---
 
@@ -111,7 +111,7 @@ docker push <registry>/dev/slime:<tag>
 - HF/SGLang 参数校验对重命名参数容错；
 - `torch_memory_saver` 预加载库按 glob 定位；
 - E2B/HARBOR 环境变量转发进 RolloutManager actor；
-- proxy 与 token 重建中将 `apply_chat_template` 输出统一转成 `list[int]`。
+- adapter 每轮 token 渲染时将 `apply_chat_template` 输出统一转成 `list[int]`。
 
 ---
 
@@ -174,7 +174,7 @@ bash examples/remote_agent/run_swebench_e2b.sh
 | `--harbor-use-local-trial` | — | 进程内运行 harbor Trial |
 | `--harbor-env-import-path` | `harbor.environments.e2b:E2BEnvironment` | 使用 E2B 环境 |
 | `--harbor-env-kwargs` | `{"override_claim_image": false}` | 使用烘入的池镜像（不做 in-place 覆盖） |
-| `--harbor-proxy-host` | **head pod IP**（不是 `0.0.0.0`） | 使 sandbox 内 agent 能访问 TokenProxy |
+| `--harbor-adapter-public-host` | **head pod IP**（不是 `0.0.0.0`） | 使 sandbox 内 agent 能访问 OpenAI adapter |
 | `--harbor-agent-name` | `swe-agent` | 内置 SWE-agent |
 | `--sglang-disable-cuda-graph` | — | SGLang 0.5.15 的 prefill CUDA graph 与 slime memory-saver 不兼容 |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | 张量并行必需 |

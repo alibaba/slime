@@ -2,13 +2,13 @@
 
 This is a verified, end-to-end recipe for training with slime where each rollout runs a
 real coding **agent inside an ACK sandbox**, driven over the **E2B protocol**. The agent's
-LLM calls are routed through slime's TokenProxy to the SGLang engines, token-level data is
+LLM calls are routed through slime's OpenAI adapter to the SGLang engines, token-level data is
 captured, and a GRPO step trains on it.
 
 ```
  slime (train_remote_agent.py)
-   ├─ SGLang engines  ← TokenProxy (records token_ids/logprobs) ←─┐
-   ├─ Megatron actors (GRPO)                                       │ OpenAI API (base_url = TokenProxy)
+   ├─ SGLang engines  ← OpenAI adapter (records token_ids/logprobs) ←─┐
+   ├─ Megatron actors (GRPO)                                       │ OpenAI API (base_url = OpenAI adapter)
    └─ generate_with_harbor ─ harbor Trial ─ E2BEnvironment ─┐      │
                                                             ▼      │
                        ACK sandbox-manager (E2B API) ─ claims ─ Sandbox pod (agent runs here)
@@ -84,8 +84,8 @@ kubectl get sandboxset -n default          # AVAILABLE should reach REPLICAS
 ### 1.4 Ray cluster
 Run slime on a Ray cluster (e.g. a KubeRay `RayCluster`) whose head pod has the GPUs and the
 workspace image from step 2. The head pod's IP must be reachable from the sandbox pods (same
-cluster network) — it is passed to the agent as `--harbor-proxy-host` so the in-sandbox agent
-can reach the TokenProxy.
+cluster network) — it is passed to the agent as `--harbor-adapter-public-host` so the in-sandbox agent
+can reach the OpenAI adapter.
 
 ---
 
@@ -116,7 +116,7 @@ is built:
 - HF/SGLang arg-validation tolerant of renamed args;
 - `torch_memory_saver` preload lib located by glob;
 - E2B/HARBOR env vars forwarded into the RolloutManager actor;
-- `apply_chat_template` outputs coerced to `list[int]` in the proxy and the token reconstruction.
+- `apply_chat_template` outputs coerced to `list[int]` in the adapter's per-turn token rendering.
 
 ---
 
@@ -181,7 +181,7 @@ bash examples/remote_agent/run_swebench_e2b.sh
 | `--harbor-use-local-trial` | — | run the harbor Trial in-process |
 | `--harbor-env-import-path` | `harbor.environments.e2b:E2BEnvironment` | use the E2B env |
 | `--harbor-env-kwargs` | `{"override_claim_image": false}` | use the baked pool image (no in-place override) |
-| `--harbor-proxy-host` | **head pod IP** (not `0.0.0.0`) | so the in-sandbox agent can reach the TokenProxy |
+| `--harbor-adapter-public-host` | **head pod IP** (not `0.0.0.0`) | so the in-sandbox agent can reach the OpenAI adapter |
 | `--harbor-agent-name` | `swe-agent` | built-in SWE-agent |
 | `--sglang-disable-cuda-graph` | — | SGLang 0.5.15 prefill CUDA graph is incompatible with slime's memory-saver mode |
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | required for tensor parallelism |
@@ -200,7 +200,7 @@ model.py:  step 0: {'train/loss': ..., 'train/entropy_loss': 2.10,
 ```
 
 Nonzero `entropy_loss` / `train_rollout_logprob_abs_diff` mean the actor ran a real forward pass
-over the reconstructed tokens. With a tiny model that solves no task, all rewards are `0` so the
+over the captured tokens. With a tiny model that solves no task, all rewards are `0` so the
 GRPO advantage (and `grad_norm`) is `0` — use a stronger model, solvable tasks, or a shaped
 reward to get a learning signal.
 

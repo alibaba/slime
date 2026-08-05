@@ -1543,18 +1543,34 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Task path template with {instance_id} placeholder.",
             )
 
-            # Proxy configuration
+            # Adapter (in-process OpenAI adapter) configuration.
+            # The adapter runs inside the RolloutManager actor and serves the
+            # remote agent's OpenAI calls (endpoint A). It reaches sglang via
+            # the router (endpoint B) using --sglang-router-ip/-port.
             parser.add_argument(
-                "--harbor-proxy-host",
+                "--harbor-adapter-bind-host",
                 type=str,
                 default="0.0.0.0",
-                help="Bind host for the LLM proxy server.",
+                help="Bind host for the in-process OpenAI adapter HTTP server.",
             )
             parser.add_argument(
-                "--harbor-proxy-port",
+                "--harbor-adapter-port",
                 type=int,
-                default=0,
-                help="Port for the LLM proxy server. 0 = auto-select.",
+                default=18001,
+                help=(
+                    "Fixed port for the adapter HTTP server. Pick a port outside "
+                    "the sglang-router auto-select range (3000-4000). 0 = auto-select."
+                ),
+            )
+            parser.add_argument(
+                "--harbor-adapter-public-host",
+                type=str,
+                default=None,
+                help=(
+                    "Head-node address the remote Harbor sandbox uses to reach "
+                    "the adapter (endpoint A). Must be reachable from outside the "
+                    "Ray cluster. Falls back to the LOCAL_IP env var."
+                ),
             )
 
             # Retry configuration
@@ -1571,14 +1587,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Base delay in seconds for exponential backoff.",
             )
 
-            # Output reconstruction
-            parser.add_argument(
-                "--harbor-disable-reconstruct",
-                action="store_true",
-                default=False,
-                help="Disable token reconstruction from proxy session data.",
-            )
-
             # Local trial mode
             parser.add_argument(
                 "--harbor-use-local-trial",
@@ -1587,8 +1595,8 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Run the Harbor Trial locally instead of submitting to a remote "
                     "Harbor server. Requires the 'harbor' package to be installed. "
-                    "The TokenProxy still works normally — LLM calls go through "
-                    "the proxy and tokens are captured for training."
+                    "The in-process adapter still works normally — LLM calls go "
+                    "through the adapter and tokens are captured for training."
                 ),
             )
 

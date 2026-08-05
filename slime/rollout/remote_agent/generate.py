@@ -8,11 +8,20 @@ Usage::
         --harbor-agent-name swe-agent \\
         --harbor-model-name openai/qwen-max \\
         --harbor-task-path-template '/home/slime/dataset-tasks/{instance_id}' \\
+        --harbor-adapter-public-host <head-node-ip> \\
+        --harbor-adapter-port 18001 \\
         --hf-checkpoint /path/to/Qwen2.5-7B-Instruct \\
         ...
 
 This function replaces the default ``generate(args, sample, sampling_params)``
 and is called once per sample by ``sglang_rollout.generate_rollout_async``.
+
+Token capture is done by an in-process ``OpenAIAdapter`` (see
+``adapter_service.HarborAdapterService``): the remote agent's OpenAI calls hit
+the adapter, which renders each turn to token ids, calls sglang ``/generate``
+and folds the result into a per-session ``TrajectoryManager``. ``finish_session``
+then linearises the session into training ``Sample`` objects — no cross-process
+REST round-trip and no post-hoc token reconstruction.
 """
 
 from __future__ import annotations
@@ -22,10 +31,10 @@ import logging
 import os
 from argparse import Namespace
 from typing import Any
-from urllib.parse import urlparse
 
 import shortuuid
 
+from slime.rollout.remote_agent.adapter_service import HarborAdapterService
 from slime.rollout.remote_agent.harbor_client import (
     HarborAgentConfig,
     HarborClient,
@@ -33,7 +42,6 @@ from slime.rollout.remote_agent.harbor_client import (
     HarborVerifierConfig,
     run_local_trial,
 )
-from slime.rollout.remote_agent.proxy import get_proxy_url
 from slime.utils.misc import SingletonMeta
 from slime.utils.types import Sample
 
@@ -47,11 +55,9 @@ logger.setLevel(logging.INFO)
 
 
 class _HarborGenerateState(metaclass=SingletonMeta):
-    """Process-level singleton holding shared generate resources."""
+    """Process-level singleton holding the remote HarborClient."""
 
     harbor_client: HarborClient | None = None
-    proxy_url: str | None = None
-    tokenizer = None
 
     def ensure_client(self, args: Namespace) -> HarborClient:
         """Lazily create HarborClient for remote mode."""
@@ -61,20 +67,6 @@ class _HarborGenerateState(metaclass=SingletonMeta):
                 timeout=args.harbor_timeout,
             )
         return self.harbor_client
-
-    def ensure_proxy_url(self) -> str:
-        """Discover the running proxy URL via Ray named actor."""
-        if self.proxy_url is None:
-            url = get_proxy_url()
-            if url is None:
-                raise RuntimeError(
-                    "Proxy server actor not found. "
-                    "Make sure the training script starts the proxy before rollout. "
-                    "See examples/remote_agent/ for a reference setup."
-                )
-            self.proxy_url = url
-            logger.info("Discovered proxy URL: %s", url)
-        return self.proxy_url
 
 
 # ---------------------------------------------------------------------------
@@ -148,20 +140,15 @@ async def generate_with_harbor(
     sample: Sample,
     sampling_params: dict[str, Any],
     evaluation: bool = False,
-) -> Sample:
-    """Custom generate function — submit one sample to Harbor, rebuild Sample.
+) -> list[Sample]:
+    """Custom generate function — submit one sample to Harbor, capture tokens.
 
     This is the entry point specified via ``--custom-generate-function-path``.
     It replaces the default SGLang HTTP generate for each sample.
 
-    Args:
-        args: Parsed CLI arguments (includes --harbor-* params).
-        sample: Current sample containing prompt and metadata.
-        sampling_params: Sampling params (temperature, top_p, max_new_tokens).
-        evaluation: Whether this is an evaluation rollout.
-
-    Returns:
-        The sample populated with tokens, response, logprobs, and mask.
+    Returns a ``list[Sample]``: normally one training sample per trial (the
+    adapter keeps a linear conversation as a single trajectory), an eval
+    placeholder on the eval path, or a single dropped sample on failure.
     """
     state = _HarborGenerateState()
     return await _generate_with_harbor_async(args, sample, sampling_params, evaluation, state)
@@ -173,64 +160,55 @@ async def _generate_with_harbor_async(
     sampling_params: dict[str, Any],
     evaluation: bool,
     state: _HarborGenerateState,
-) -> Sample:
+) -> list[Sample]:
     """Async core implementation."""
-    import httpx
-
     use_local = getattr(args, "harbor_use_local_trial", False)
-    proxy_url = state.ensure_proxy_url()
+    service = HarborAdapterService(args)
 
-    # 1. Generate trial_id
-    # Support reading instance_id from metadata or directly from sample (for swe-bench format)
+    # 1. Resolve identifiers. The group layer assigns a unique session_id per
+    #    sample; fall back to a readable one built from instance_id.
     instance_id = sample.metadata.get("instance_id") or sample.metadata.get("task_name")
     if instance_id is None:
         instance_id = str(sample.index)
-    trial_id = f"{instance_id}-{shortuuid.uuid()}"
-    logger.info("[Harbor][%s] Starting generate, use_local=%s, proxy_url=%s, prompt_len=%d", trial_id, use_local, proxy_url, len(sample.prompt) if sample.prompt else 0)
+    sid = sample.session_id or f"{instance_id}-{shortuuid.uuid()}"
+    sample.session_id = sid
+    logger.info(
+        "[Harbor][%s] Starting generate, use_local=%s, evaluation=%s, adapter_url=%s",
+        sid,
+        use_local,
+        evaluation,
+        service.adapter_url,
+    )
 
-    # 2. Register session with proxy
-    logger.debug("[Harbor][%s] Registering session with proxy", trial_id)
-    async with httpx.AsyncClient() as http:
-        await http.post(f"{proxy_url}/sessions/{trial_id}")
+    # 2. Open the adapter session that the agent's OpenAI calls fold into.
+    service.adapter.open_session(
+        sid,
+        sampling_defaults=sampling_params,
+        max_context_tokens=service.max_context_len,
+    )
 
     try:
-        # 3. Build agent_base_url that the agent can reach
-        # Use harbor-proxy-host arg if set, otherwise fall back to LOCAL_IP env var
-        proxy_host = args.harbor_proxy_host
-        if proxy_host == "0.0.0.0":
-            proxy_host = os.getenv("LOCAL_IP", "0.0.0.0")
-        if proxy_host == "0.0.0.0":
-            logger.warning(
-                "[Harbor][%s] LOCAL_IP is not set and --harbor-proxy-host is default. "
-                "The Harbor agent may not be able to reach the proxy.",
-                trial_id,
-            )
+        # 3. Agent-facing endpoint (endpoint A). Session travels via the Bearer
+        #    token (OPENAI_API_KEY = sid), resolved by the adapter's sid_from_bearer.
+        agent_base_url = f"{service.adapter_url}/v1"
 
-        parsed = urlparse(proxy_url)
-        proxy_port = parsed.port
-        agent_base_url = f"http://{proxy_host}:{proxy_port}/{trial_id}/v1"
-        logger.info("[Harbor][%s] Agent base_url=%s (proxy_host=%s)", trial_id, agent_base_url, proxy_host)
-
-        # 4. Resolve task path
+        # 4. Resolve task path.
         task_path = args.harbor_task_path_template.format(instance_id=instance_id)
-        logger.info("[Harbor][%s] Resolved task_path=%s", trial_id, task_path)
 
-        # 4b. Resolve the per-task SandboxSet name from the task's pod-size class
-        # and merge it into the (otherwise global) environment kwargs so it
-        # reaches the Harbor environment / e2b SDK for this trial.
+        # 4b. Resolve the per-task SandboxSet name and merge it into the
+        #     (otherwise global) environment kwargs so it reaches the Harbor
+        #     environment / e2b SDK for this trial.
         env_kwargs = dict(getattr(args, "harbor_env_kwargs", {}) or {})
         sandbox_set_name = _resolve_sandbox_set_name(args, sample, task_path)
         if sandbox_set_name:
             key = getattr(args, "harbor_sandbox_set_key", "sandbox_set_name")
             env_kwargs[key] = sandbox_set_name
-            logger.info(
-                "[Harbor][%s] Routing to SandboxSet %s=%s", trial_id, key, sandbox_set_name
-            )
+            logger.info("[Harbor][%s] Routing to SandboxSet %s=%s", sid, key, sandbox_set_name)
 
-        # 5. Build agent configuration
+        # 5. Build agent configuration.
         agent_kwargs = dict(args.harbor_agent_kwargs)
         agent_kwargs["api_base"] = agent_base_url
-        agent_kwargs["session_id"] = trial_id
+        agent_kwargs["session_id"] = sid
         agent_kwargs["temperature"] = sampling_params.get("temperature", 1.0)
         agent_kwargs["top_p"] = sampling_params.get("top_p", 1.0)
 
@@ -241,15 +219,16 @@ async def _generate_with_harbor_async(
             llm_proxy_url=agent_base_url,
             kwargs=agent_kwargs,
         )
-        logger.debug("[Harbor][%s] Built agent_config: name=%s, model=%s", trial_id, agent_config.name, agent_config.model_name)
 
-        # Environment overrides — inject OpenAI SDK vars pointing to our proxy
+        # Environment overrides — point the OpenAI SDK at the adapter and carry
+        # the session id as the API key (Bearer). These MUST match the adapter
+        # session, so set them explicitly rather than via setdefault.
         env_overrides = dict(args.harbor_env_overrides)
-        env_overrides.setdefault("OPENAI_API_KEY", "slime-proxy")
-        env_overrides.setdefault("OPENAI_BASE_URL", agent_base_url)
+        env_overrides["OPENAI_API_KEY"] = sid
+        env_overrides["OPENAI_BASE_URL"] = agent_base_url
 
-        # 6. Submit to agent (remote or local)
-        logger.info("[Harbor][%s] Submitting trial (%s mode)...", trial_id, "local" if use_local else "remote")
+        # 6. Submit to agent (remote or local).
+        logger.info("[Harbor][%s] Submitting trial (%s mode)...", sid, "local" if use_local else "remote")
         if use_local:
             result = await run_local_trial(
                 task_path=task_path,
@@ -265,75 +244,81 @@ async def _generate_with_harbor_async(
             result = await _submit_with_retry(
                 args=args,
                 client=client,
-                trial_id=trial_id,
+                service=service,
+                sid=sid,
+                sampling_params=sampling_params,
                 task_path=task_path,
                 agent_config=agent_config,
                 env_overrides=env_overrides,
                 environment_kwargs=env_kwargs,
-                proxy_url=proxy_url,
             )
-        logger.info("[Harbor][%s] Trial completed with status=%s, reward=%s", trial_id, result.status, result.rewards)
+        reward = float(result.rewards.get("reward", 0.0)) if result.rewards else 0.0
+        logger.info("[Harbor][%s] Trial completed status=%s reward=%.4f", sid, result.status, reward)
 
-        # 7. Mark session complete
-        logger.debug("[Harbor][%s] Marking session as complete", trial_id)
-        async with httpx.AsyncClient() as http:
-            await http.post(f"{proxy_url}/sessions/{trial_id}/complete")
+        trial_metadata = {
+            "trial_id": sid,
+            "harbor_run_id": result.run_id,
+            "harbor_status": result.status,
+            "harbor_mode": "local" if use_local else "remote",
+            "instance_id": instance_id,
+        }
 
-        # 8. Fetch session recording
-        logger.debug("[Harbor][%s] Fetching session recording", trial_id)
-        session_data = None
-        async with httpx.AsyncClient() as http:
-            resp = await http.get(f"{proxy_url}/sessions/{trial_id}")
-            if resp.status_code == 200:
-                session_data = resp.json()
-                num_turns = len(session_data.get("turns", []))
-                logger.debug("[Harbor][%s] Session has %d turns", trial_id, num_turns)
+        # 7. Eval path only needs the reward — skip token capture.
+        if evaluation:
+            return [_make_eval_sample(sample, reward=reward, metadata=trial_metadata)]
 
-        # 9. Reconstruct Sample fields from session data
-        if (
-            session_data
-            and session_data.get("turns")
-            and not getattr(args, "harbor_disable_reconstruct", False)
-        ):
-            _reconstruct_output(sample, session_data, args)
-            logger.info(
-                "[Harbor][%s] Reconstructed sample: response_len=%d, num_tokens=%d",
-                trial_id,
-                sample.response_length,
-                len(sample.tokens) if sample.tokens else 0,
-            )
-        else:
-            logger.warning(
-                "[Harbor][%s] Session has no recorded turns — token reconstruction skipped.",
-                trial_id,
-            )
-            # Even on failure, we must set prompt tokens to avoid training crash
-            # (total_length = 0 causes RuntimeError: narrow() length must be non-negative)
-            _init_sample_with_prompt_only(sample, args)
-            sample.response = ""
-            sample.response_length = 0
-            sample.status = Sample.Status.FAILED
+        # 8. Drain the captured trajectory into training samples.
+        samples = await service.adapter.finish_session(
+            sid,
+            base_sample=sample,
+            reward=reward,
+            extra_metadata=trial_metadata,
+        )
+        if not samples:
+            logger.warning("[Harbor][%s] No turns recorded — dropping sample.", sid)
+            return [_make_aborted_sample(sample, reason="adapter_session_empty", metadata=trial_metadata)]
 
-        # 10. Fill reward from Harbor result
-        if result.rewards:
-            sample.reward = result.rewards.get("reward", 0.0)
+        logger.info("[Harbor][%s] Finished: status=%s reward=%.4f samples=%d", sid, result.status, reward, len(samples))
+        return samples
 
-        # 11. Record metadata
-        sample.metadata["trial_id"] = trial_id
-        sample.metadata["harbor_run_id"] = result.run_id
-        sample.metadata["harbor_status"] = result.status
-        sample.metadata["harbor_mode"] = "local" if use_local else "remote"
-        logger.info("[Harbor][%s] Trial finished: status=%s, reward=%.4f", trial_id, sample.status, sample.reward or 0.0)
-
+    except Exception as e:
+        logger.warning("[Harbor][%s] Rollout failed: %s: %s", sid, type(e).__name__, e)
+        return [_make_aborted_sample(sample, reason=f"exception:{type(e).__name__}", metadata={"instance_id": instance_id})]
     finally:
-        # 12. Clean up session
-        logger.debug("[Harbor][%s] Cleaning up session", trial_id)
-        async with httpx.AsyncClient() as http:
-            try:
-                await http.delete(f"{proxy_url}/sessions/{trial_id}")
-            except Exception:
-                pass
+        # Cleanup only, idempotent (also drops any leftover trajectory state).
+        await service.adapter.drop_session(sid)
 
+
+# ---------------------------------------------------------------------------
+# Result helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_aborted_sample(sample: Sample, *, reason: str, metadata: dict) -> Sample:
+    """Mark ``sample`` dropped in place (2-token dummy avoids training narrow())."""
+    sample.tokens = [0, 0]
+    sample.response = ""
+    sample.response_length = 1
+    sample.loss_mask = [0]
+    sample.rollout_log_probs = [0.0]
+    sample.reward = 0.0
+    sample.remove_sample = True
+    sample.status = Sample.Status.ABORTED
+    sample.metadata = {**(sample.metadata or {}), **metadata, "abort_reason": reason}
+    return sample
+
+
+def _make_eval_sample(sample: Sample, *, reward: float, metadata: dict) -> Sample:
+    """Eval-path placeholder: only ``reward`` matters."""
+    sample.tokens = [0, 0]
+    sample.response = ""
+    sample.response_length = 1
+    sample.loss_mask = [0]
+    sample.rollout_log_probs = [0.0]
+    sample.reward = reward
+    sample.remove_sample = True
+    sample.status = Sample.Status.COMPLETED
+    sample.metadata = {**(sample.metadata or {}), **metadata}
     return sample
 
 
@@ -345,20 +330,20 @@ async def _generate_with_harbor_async(
 async def _submit_with_retry(
     args: Namespace,
     client: HarborClient,
-    trial_id: str,
+    service: HarborAdapterService,
+    sid: str,
+    sampling_params: dict[str, Any],
     task_path: str,
     agent_config: HarborAgentConfig,
     env_overrides: dict[str, Any],
-    proxy_url: str,
     environment_kwargs: dict[str, Any] | None = None,
 ) -> HarborRunResult:
     """Submit to remote Harbor with exponential backoff retry.
 
-    Only used in remote mode (not local trial).  Local mode does not
-    retry since the agent runs synchronously in the current process.
+    Only used in remote mode (not local trial). On retry the adapter session is
+    reset (drop + reopen) so a partial trajectory from the failed attempt does
+    not leak into the retried run.
     """
-    import httpx
-
     max_retries = getattr(args, "harbor_max_retries", 3)
     base_delay = getattr(args, "harbor_retry_base_delay", 2.0)
     last_error: Exception | None = None
@@ -368,20 +353,20 @@ async def _submit_with_retry(
             delay = base_delay * (2 ** (attempt - 1))
             logger.warning(
                 "Retrying trial %s (attempt %d/%d) after %.1fs delay",
-                trial_id,
+                sid,
                 attempt + 1,
                 max_retries,
                 delay,
             )
             await asyncio.sleep(delay)
 
-            # Reset session for clean retry
-            async with httpx.AsyncClient() as http:
-                try:
-                    await http.delete(f"{proxy_url}/sessions/{trial_id}")
-                except Exception:
-                    pass
-                await http.post(f"{proxy_url}/sessions/{trial_id}")
+            # Reset the adapter session for a clean retry.
+            await service.adapter.drop_session(sid)
+            service.adapter.open_session(
+                sid,
+                sampling_defaults=sampling_params,
+                max_context_tokens=service.max_context_len,
+            )
 
         try:
             result = await client.submit_async(
@@ -395,7 +380,7 @@ async def _submit_with_retry(
                     else dict(getattr(args, "harbor_env_kwargs", {}) or {})
                 ),
                 job_id=getattr(args, "wandb_group", None) or "slime-rl",
-                task_id=trial_id,
+                task_id=sid,
             )
 
             if result.status == "completed":
@@ -406,7 +391,7 @@ async def _submit_with_retry(
             )
             logger.warning(
                 "Trial %s attempt %d/%d %s: %s",
-                trial_id,
+                sid,
                 attempt + 1,
                 max_retries,
                 result.status,
@@ -417,7 +402,7 @@ async def _submit_with_retry(
             last_error = e
             logger.warning(
                 "Trial %s attempt %d/%d raised %s: %s",
-                trial_id,
+                sid,
                 attempt + 1,
                 max_retries,
                 type(e).__name__,
@@ -430,190 +415,3 @@ async def _submit_with_retry(
         rewards={"reward": 0.0},
         error_message=f"All {max_retries} retries exhausted: {last_error}",
     )
-
-
-# ---------------------------------------------------------------------------
-# Output reconstruction
-# ---------------------------------------------------------------------------
-
-
-def _reconstruct_output(
-    sample: Sample, session_data: dict, args: Namespace
-) -> None:
-    """Rebuild Sample tokens / logprobs / mask from proxy session data.
-
-    Traverses all recorded turns and:
-    - LLM-generated tokens → mask=1 (participate in loss)
-    - Tool/user replies → mask=0 (masked out of loss)
-
-    Inspired by ``RemoteAgentLoop._reconstruct_output`` in Verl.
-    """
-    turns = session_data.get("turns", [])
-    if not turns:
-        sample.status = Sample.Status.FAILED
-        return
-
-    response_ids: list[int] = []
-    response_mask: list[int] = []
-    response_logprobs: list[float] = []
-    num_turns = 0
-
-    # Lazy tokenizer init
-    state = _HarborGenerateState()
-    if state.tokenizer is None:
-        from transformers import AutoTokenizer
-
-        ckpt = getattr(args, "hf_checkpoint", None)
-        if ckpt is None:
-            raise ValueError(
-                "--hf-checkpoint is required for token reconstruction. "
-                "Pass the HuggingFace model path used by the rollout engines."
-            )
-        state.tokenizer = AutoTokenizer.from_pretrained(
-            ckpt, trust_remote_code=True
-        )
-    tokenizer = state.tokenizer
-
-    for i, turn in enumerate(turns):
-        # LLM generation → mask=1
-        completion_ids = turn.get("completion_token_ids", [])
-        completion_logprobs = turn.get("completion_logprobs", [])
-
-        response_ids.extend(completion_ids)
-        response_mask.extend([1] * len(completion_ids))
-        response_logprobs.extend(completion_logprobs)
-        num_turns += 1
-
-        # Multi-turn: new tool/user messages in next turn → mask=0
-        if i + 1 < len(turns):
-            next_turn = turns[i + 1]
-            prev_count = len(turn.get("request_messages", []))
-            next_count = len(next_turn.get("request_messages", []))
-
-            if next_count > prev_count:
-                new_messages = next_turn["request_messages"][prev_count:]
-                tool_messages = [
-                    m
-                    for m in new_messages
-                    if m.get("role") in ("tool", "user", "system")
-                ]
-                if tool_messages:
-                    tool_ids = _tokenize_messages(tool_messages, tokenizer)
-                    response_ids.extend(tool_ids)
-                    response_mask.extend([0] * len(tool_ids))
-                    response_logprobs.extend([0.0] * len(tool_ids))
-                    num_turns += len(tool_messages)
-
-    # Truncate to max response length
-    max_len = getattr(args, "rollout_max_response_len", 4096) or 4096
-    response_ids = response_ids[:max_len]
-    response_mask = response_mask[:max_len]
-    response_logprobs = response_logprobs[:max_len]
-
-    # Tokenize prompt to get prompt_ids
-    prompt_ids = _tokenize_prompt(sample, tokenizer)
-
-    # Populate Sample: tokens = prompt_ids + response_ids (MUST include prompt tokens)
-    sample.tokens = prompt_ids + response_ids
-    sample.response_length = len(response_ids)  # Only response length, not total
-    sample.rollout_log_probs = response_logprobs if response_logprobs else None
-    sample.response = "".join(
-        turn.get("completion_text", "") for turn in turns
-    )
-    sample.status = Sample.Status.COMPLETED
-    sample.loss_mask = response_mask
-    sample.metadata["num_agent_turns"] = num_turns
-    sample.metadata["prompt_length"] = len(prompt_ids)
-
-
-def _as_token_ids(tokenized) -> list[int]:
-    """Coerce ``apply_chat_template`` output to a flat ``list[int]``.
-
-    Newer transformers may return a ``BatchEncoding`` (dict-like) or a tensor instead of a
-    plain list. Iterating a ``BatchEncoding`` yields its string keys ("input_ids", ...),
-    which would corrupt the token stream, so normalize here.
-    """
-    if hasattr(tokenized, "input_ids"):
-        tokenized = tokenized["input_ids"]
-    if hasattr(tokenized, "tolist"):
-        tokenized = tokenized.tolist()
-    return tokenized
-
-
-def _tokenize_messages(
-    messages: list[dict], tokenizer
-) -> list[int]:
-    """Tokenize a list of chat messages into token IDs."""
-    normalized = []
-    for msg in messages:
-        msg = dict(msg)
-        content = msg.get("content")
-        if isinstance(content, list):
-            text_parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_parts.append(part.get("text", ""))
-                elif isinstance(part, str):
-                    text_parts.append(part)
-            msg["content"] = "\n".join(text_parts) if text_parts else ""
-        normalized.append(msg)
-
-    return _as_token_ids(
-        tokenizer.apply_chat_template(
-            normalized, add_generation_prompt=False, tokenize=True
-        )
-    )
-
-
-def _tokenize_prompt(sample: Sample, tokenizer) -> list[int]:
-    """Tokenize the prompt part of a sample.
-
-    Args:
-        sample: The sample containing prompt (str or list of messages).
-        tokenizer: HuggingFace tokenizer.
-
-    Returns:
-        List of token IDs for the prompt.
-    """
-    prompt = sample.prompt
-    if isinstance(prompt, str):
-        # Plain text prompt
-        return tokenizer.encode(prompt, add_special_tokens=False)
-    elif isinstance(prompt, list):
-        # Chat format (list of messages)
-        return _as_token_ids(
-            tokenizer.apply_chat_template(
-                prompt, add_generation_prompt=True, tokenize=True
-            )
-        )
-    return []
-
-
-def _init_sample_with_prompt_only(sample: Sample, args: Namespace) -> None:
-    """Initialize sample.tokens with prompt tokens when there's no response.
-
-    This is called when the Harbor trial fails or has no recorded turns.
-    Without prompt tokens, total_length would be 0, causing training to crash
-    with: RuntimeError: narrow(): length must be non-negative.
-
-    Args:
-        sample: The sample to initialize.
-        args: CLI args containing hf_checkpoint for tokenizer.
-    """
-    state = _HarborGenerateState()
-    if state.tokenizer is None:
-        from transformers import AutoTokenizer
-
-        ckpt = getattr(args, "hf_checkpoint", None)
-        if ckpt is None:
-            logger.warning(
-                "--hf-checkpoint not set, cannot tokenize prompt for failed sample"
-            )
-            sample.tokens = []
-            return
-        state.tokenizer = AutoTokenizer.from_pretrained(
-            ckpt, trust_remote_code=True
-        )
-
-    sample.tokens = _tokenize_prompt(sample, state.tokenizer)
-    sample.metadata["prompt_length"] = len(sample.tokens)

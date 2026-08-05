@@ -266,8 +266,8 @@ async def run_local_trial(
     """Run a Harbor Trial directly in the current Python process.
 
     This bypasses the Harbor HTTP server entirely.  The agent executes
-    locally, but its LLM calls still go through the TokenProxy (if one
-    is running) so tokens are captured for training.
+    locally, but its LLM calls still go through the in-process OpenAI
+    adapter so tokens are captured for training.
 
     Args:
         task_path: Path to the local task directory.

@@ -477,11 +477,7 @@ class RolloutManager:
         return self._get_metrics_router_addr()
 
     def get_engine_handles(self):
-        """Return a list of engine actor handles for use by external proxies.
-
-        The returned handles can be passed to ``start_proxy_server`` in
-        ``slime.rollout.remote_agent.proxy`` to launch the Harbor LLM proxy.
-        """
+        """Return a list of engine actor handles for external callers."""
         return [e for srv in self.servers.values() for e in srv.engines]
 
     def _try_ci_fault_injection(self):

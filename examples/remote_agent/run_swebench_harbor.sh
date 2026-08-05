@@ -50,7 +50,7 @@ python ../../train_remote_agent.py \
   --harbor-agent-name "$HARBOR_AGENT_NAME" \
   --harbor-model-name "$HARBOR_MODEL_NAME" \
   --harbor-task-path-template "$HARBOR_TASK_PATH_TEMPLATE" \
-  --harbor-proxy-host "$LOCAL_IP" \
+  --harbor-adapter-public-host "$LOCAL_IP" \
   --harbor-max-retries 3 \
   --harbor-agent-kwargs '{"total_cost_limit": 0, "per_instance_cost_limit": 0}' \
   --hf-checkpoint "$HF_CHECKPOINT" \

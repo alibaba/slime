@@ -46,7 +46,7 @@ python train_remote_agent.py \
   --custom-generate-function-path slime.rollout.remote_agent.generate.generate_with_harbor \
   --rollout-function-path slime.rollout.sglang_rollout.generate_rollout \
   --harbor-use-local-trial \
-  --harbor-proxy-host "$PROXY_HOST" \
+  --harbor-adapter-public-host "$PROXY_HOST" \
   --harbor-agent-name swe-agent \
   --harbor-model-name "$MODEL_NAME" \
   --harbor-task-path-template "$TASK_PATH_TEMPLATE" \

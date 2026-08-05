@@ -1,10 +1,12 @@
 """Training entry point with Remote Agent (Harbor) support.
 
-This file wraps the standard ``train.py`` workflow with additional logic
-to start the LLM TokenProxy before the training loop begins.  The proxy
-intercepts OpenAI-compatible requests from the Harbor agent, routes them
-to the SGLang rollout engines via Ray RPC, and records token-level data
-for loss computation.
+This wraps the standard ``train.py`` workflow for the Harbor remote-agent
+rollout. Token capture is handled by an in-process ``OpenAIAdapter`` that
+``generate_with_harbor`` starts lazily inside the ``RolloutManager`` actor
+(see ``slime.rollout.remote_agent.adapter_service``): the remote agent's
+OpenAI calls hit the adapter, which routes them to the sglang router and
+records token-level data per session for loss computation. No separate proxy
+process is started here.
 
 Usage::
 
@@ -13,6 +15,8 @@ Usage::
         --harbor-agent-name swe-agent \
         --harbor-model-name openai/qwen-max \
         --harbor-task-path-template '/data/tasks/{instance_id}' \
+        --harbor-adapter-public-host <head-node-ip> \
+        --harbor-adapter-port 18001 \
         --hf-checkpoint /path/to/Qwen2.5-7B-Instruct \
         ...
 
@@ -28,7 +32,6 @@ For local trial mode (no remote Harbor server)::
 """
 
 import logging
-import os
 
 import ray
 
@@ -38,48 +41,6 @@ from slime.utils.logging_utils import configure_logger, finish_tracking, init_tr
 from slime.utils.misc import should_run_periodic_action
 
 logger = logging.getLogger(__name__)
-
-
-def _start_harbor_proxy(args, rollout_manager) -> str | None:
-    """Start the Harbor LLM TokenProxy if remote agent args are configured.
-
-    The proxy is created as a Ray named actor pinned to the head node.
-    It serves OpenAI-compatible HTTP and records token data per session.
-
-    Returns:
-        The proxy URL (e.g. ``http://10.0.1.5:9123``), or ``None`` if
-        remote agent is not configured.
-    """
-    if not (args.harbor_agent_name or args.harbor_agent_import_path):
-        return None
-
-    from slime.rollout.remote_agent.proxy import start_proxy_server
-
-    # Obtain engine handles from the rollout manager
-    engine_handles = ray.get(rollout_manager.get_engine_handles.remote())
-    proxy_url = start_proxy_server(
-        engine_handles=engine_handles,
-        model_path=args.hf_checkpoint,
-        host=args.harbor_proxy_host,
-        port=args.harbor_proxy_port,
-    )
-
-    # Set LOCAL_IP so Harbor agents (running in Docker/K8s) can reach the proxy
-    if not os.getenv("LOCAL_IP"):
-        os.environ["LOCAL_IP"] = args.harbor_proxy_host
-
-    logger.info("Harbor LLM Proxy started at %s", proxy_url)
-    return proxy_url
-
-
-def _stop_harbor_proxy():
-    """Gracefully shut down the Harbor proxy actor."""
-    try:
-        from slime.rollout.remote_agent.proxy import stop_proxy_server
-        stop_proxy_server()
-        logger.info("Harbor LLM Proxy stopped")
-    except Exception as e:
-        logger.warning("Failed to stop Harbor proxy: %s", e)
 
 
 def train(args):
@@ -92,8 +53,8 @@ def train(args):
     # need to initialize rollout manager first to calculate num_rollout
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 
-    # -- Harbor Remote Agent: start TokenProxy --
-    proxy_url = _start_harbor_proxy(args, rollout_manager)
+    # Note: the Harbor OpenAI adapter is started lazily by generate_with_harbor
+    # inside the RolloutManager actor; no proxy process is started here.
 
     # Update primary W&B with SGLang metrics endpoint now that servers are up.
     router_addr = ray.get(rollout_manager.get_metrics_router_addr.remote())
@@ -182,8 +143,6 @@ def train(args):
 
     # -- Cleanup --
     ray.get(rollout_manager.dispose.remote())
-    if proxy_url is not None:
-        _stop_harbor_proxy()
     finish_tracking(args)
 
 

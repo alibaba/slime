@@ -5,9 +5,10 @@ plumbing that converts a per-instance pod-size class (from ``task.toml`` or the
 sample metadata) into a SandboxSet name passed to Harbor via
 ``environment_kwargs``.
 
-The generate module transitively imports heavy runtime deps (torch, shortuuid,
-httpx, ray-backed proxy). We stub those so the two pure resolver functions can
-be loaded and exercised without the full stack.
+The generate module transitively imports heavy runtime deps (shortuuid and the
+in-process adapter service, which pulls in torch/aiohttp/tokenizers). We stub
+those so the two pure resolver functions can be loaded and exercised without the
+full stack.
 """
 
 from __future__ import annotations
@@ -33,10 +34,8 @@ def _install_stub(name: str, **attrs) -> None:
 
 def _load_generate_module():
     """Load generate.py in isolation with its absolute imports stubbed."""
-    _install_stub("torch")
     _install_stub("shortuuid", uuid=lambda: "stubuuid")
-    _install_stub("httpx")
-    # slime package namespace + the two things generate.py imports from slime
+    # slime package namespace + the things generate.py imports from slime
     for pkg in ("slime", "slime.rollout", "slime.rollout.remote_agent", "slime.utils"):
         _install_stub(pkg)
     _install_stub("slime.utils.misc", SingletonMeta=type)
@@ -49,7 +48,7 @@ def _load_generate_module():
         HarborVerifierConfig=object,
         run_local_trial=lambda *a, **k: None,
     )
-    _install_stub("slime.rollout.remote_agent.proxy", get_proxy_url=lambda: None)
+    _install_stub("slime.rollout.remote_agent.adapter_service", HarborAdapterService=object)
 
     spec = importlib.util.spec_from_file_location("_harbor_generate_under_test", _GENERATE_PY)
     mod = importlib.util.module_from_spec(spec)

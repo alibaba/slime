@@ -1,5 +1,18 @@
 # Slime RemoteAgent 设计方案 (Harbor 对接 / custom-generate-function)
 
+> **⚠️ 已部分过时（历史设计文档）**
+>
+> 本文档描述的是早期基于独立 `TokenProxy`（head-node Ray 命名 actor + FastAPI/LiteLLM
+> + REST `/sessions`、`/engines` 自注册 + 事后 `_reconstruct_output`）的实现。该实现已被
+> **进程内 `OpenAIAdapter` + `TrajectoryManager`** 方案取代：adapter 运行在
+> `RolloutManager` actor 内，token 在生成时即被捕获，`finish_session` 直接产出训练
+> `Sample`，不再有跨进程 REST 往返、引擎自注册或 token 重建。sglang 访问复用 slime 自带的
+> sglang router（`--sglang-router-ip/-port`）。
+>
+> 最新实现见 `slime/rollout/remote_agent/adapter_service.py` 与 `generate.py`，以及
+> `examples/remote_agent/README.md`。下文的 `TokenProxy`/`--harbor-proxy-*`/
+> `--harbor-disable-reconstruct` 等已不存在。
+
 ## 一、核心思路
 
 利用 slime 已有的 `--custom-generate-function-path` 扩展点，在 **单个 sample 的 generate 函数** 内完成 Harbor 任务提交和 token 重建，无需修改 slime 核心代码，也无需引入新的 Loop 类型。
