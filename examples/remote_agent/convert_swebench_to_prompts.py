@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Convert SWE-bench verified dataset to Slime prompt format.
 
+适配的训练脚本（旧 Harbor/TokenProxy 链路，metadata 带 sandbox_image，无 sandbox_set_name）：
+  - run_swebench_harbor.sh   （消费本脚本输出的 prompts.jsonl，见其头部 Usage）
+  - harbor_qwen.sh           （同上，PROMPT_DATA=/path/to/prompts.jsonl）
+不适配 ACK E2B adapter 链路（run_swebench_e2b*.sh）——那条链路需要 metadata.sandbox_set_name，
+请改用 convert_swebench_tasks_to_prompts.py。
+注：harbor_local_trial.sh / run_swebench_local.sh 直接读原始 swe-bench-verified.jsonl，无需转换。
+
 Usage:
     python convert_swebench_to_prompts.py \
         --input swe-bench-verified.jsonl \
