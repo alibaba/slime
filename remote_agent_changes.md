@@ -89,32 +89,25 @@ adapter 由 `generate_with_harbor` 首次调用懒启动。（修掉了 e2b base
 
 ---
 
-## 5. 脚本审查表（`examples/remote_agent/`）
+## 5. 脚本（`examples/remote_agent/`，已完成整合）
 
-用户已在两个 converter 的头部把"旧 Harbor/TokenProxy 链路"与"ACK E2B adapter 链路"划清。据此分类：
+9 个新旧脚本已合并为**一个统一启动器** `run_swebench.sh`（`MODE`×`DEPLOY`×模型 三开关，见
+[`docs/zh/platform_support/remote_agent_run_config.md`](docs/zh/platform_support/remote_agent_run_config.md)）。
 
-### ✅ 保留（当前 adapter 链路，已测）
-| 脚本 | 用途 |
+### ✅ 当前保留
+| 文件 | 用途 |
 |---|---|
-| `run_swebench_e2b.sh` | mode A（进程内 local-trial）colocate。⚠️头部注释"TokenProxy"待改。|
-| `run_swebench_e2b_disagg.sh` | mode A 训推分离。⚠️同上。|
-| `run_swebench_kuberl_27b.sh` | mode B（kube-rl）27B colocate。|
-| `run_swebench_kuberl_27b_disagg.sh` | mode B 27B 训推分离。|
-| `convert_swebench_tasks_to_prompts.py` | adapter 链路的 prompt 转换（带 `sandbox_set_name`、`--prompt-as-messages`）。|
-| `prepare_model.sh` / `swe-bench-verified.jsonl` / `README.md` | 模型准备 / 样例数据 / 说明。|
+| `run_swebench.sh` | **统一启动器**：`MODE=local\|kuberl` × `DEPLOY=colocate\|disagg` × 模型（含 27B 多模态）|
+| `convert_swebench_tasks_to_prompts.py` | adapter 链路 prompt 转换（`sandbox_set_name`、`--prompt-as-messages`）|
+| `prepare_model.sh` / `swe-bench-verified.jsonl` / `small_prompts.jsonl` / `README.md` | 模型准备 / 样例数据 / 说明 |
 
-### 🗑 疑似废弃（旧 Harbor/TokenProxy 链路，已被上面的 adapter 脚本取代；这一组互相自洽，一起删不影响 adapter 链路）
-| 脚本 | 为何废弃 |
-|---|---|
-| `harbor_qwen.sh` | 旧通用远程示例；占位符 `/path/to/...`、无 preset/MODEL_ARGS、无 sandbox_set 路由。|
-| `harbor_local_trial.sh` | 旧 local-trial 示例；注释仍写 TokenProxy、占位符 checkpoint。|
-| `run_swebench_harbor.sh` | 旧通用远程；占位符默认、`global-batch-size 1` vs 8 卡 DP 不整除会崩、无 preset。|
-| `run_swebench_local.sh` | 旧通用 local；与 `run_swebench_e2b.sh`(mode A) 重叠、无 e2b/sandbox_set 路由。|
-| `convert_swebench_to_prompts.py` | 仅服务上面 `run_swebench_harbor.sh` + `harbor_qwen.sh`（旧链路 metadata，无 sandbox_set_name）。|
+### 🗑 已删除（被 `run_swebench.sh` 取代）
+- adapter 链路(4)：`run_swebench_e2b.sh`、`run_swebench_e2b_disagg.sh`、`run_swebench_kuberl_27b.sh`、`run_swebench_kuberl_27b_disagg.sh`
+- 旧 Harbor/TokenProxy 链路(5)：`harbor_qwen.sh`、`harbor_local_trial.sh`、`run_swebench_harbor.sh`、`run_swebench_local.sh`、`convert_swebench_to_prompts.py`
 
-### 🚩 建议移除（非"脚本失效"，而是不该入库）
+引用这些脚本的文档（README、runbook、ACK 指南、converter 头）已同步改为 `run_swebench.sh`。
+
+### 🚩 仍待处理
 | 文件 | 原因 |
 |---|---|
-| `kubeconfig` | 集群凭证文件被提交，安全隐患；建议删 + `.gitignore`。|
-
-> 我**没有删除任何文件**。上面 🗑 / 🚩 是候选，等你确认哪些可删，我再动手。
+| `kubeconfig` | 集群凭证文件被提交，安全隐患；建议删 + `.gitignore`（未处理，待确认）|

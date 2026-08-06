@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """Convert harbor-format SWE-bench task directories into slime prompt JSONL.
 
-适配的训练脚本（ACK E2B adapter 链路，按 metadata.sandbox_set_name 路由到预建 SandboxSet）：
-  - run_swebench_e2b.sh         （colocate；默认 PROMPT_DATA=small_prompts.jsonl 即本脚本输出）
-  - run_swebench_e2b_disagg.sh  （分离式/训推分离；同上）
-  - run_swebench_kuberl_27b.sh / run_swebench_kuberl_27b_disagg.sh
-                                （27B 多模态；用 --prompt-as-messages 生成消息 list 格式，
-                                 对齐其 prompts_27b.jsonl，配 --apply-chat-template）
-不适配旧 Harbor/TokenProxy 链路（run_swebench_harbor.sh / harbor_qwen.sh）——
-那条链路请用 convert_swebench_to_prompts.py。
+输出的 prompts.jsonl 由统一启动器 ``run_swebench.sh`` 消费（按 metadata.sandbox_set_name
+路由到预建 SandboxSet）。多模态模型（如 27B）用 ``--prompt-as-messages`` 生成消息 list 格式，
+并在 run_swebench.sh 侧配 ``APPLY_CHAT_TEMPLATE=1``。参数详解见
+docs/zh/platform_support/remote_agent_run_config.md。
 
 Scans ``<dataset-root>/<instance_id>/task.toml`` (harbor task format) and writes
-one line per task in the format consumed by ``run_swebench_e2b*.sh``:
+one line per task in the format consumed by ``run_swebench.sh``:
 
     {"prompt": "...", "task_name": "astropy__astropy-14309",
      "metadata": {"sandbox_set_name": "slime-sbx-astropy-14309"}}

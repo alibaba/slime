@@ -102,25 +102,22 @@ kubectl exec -n default $POD -- python /root/slime/examples/remote_agent/convert
 
 ## 4. 运行 —— 两种模式（都实测通过）
 
-脚本 `examples/remote_agent/run_swebench_e2b.sh` 全参数走环境变量覆盖。两模式共同点：
-`--harbor-adapter-public-host $(hostname -i)`（端点A，非 0.0.0.0）、`--harbor-env-kwargs '{"override_claim_image": false}'`、
-每 prompt 的 `metadata.sandbox_set_name`。**8 GPU 时 TP=2→DP=4 需 `global-batch-size` 为 4 的倍数；用 2 GPU(TP=2→DP=1)最省，`global-batch-size=2` 即可。**
+统一启动器 `examples/remote_agent/run_swebench.sh` 用环境变量切换：`MODE`(local|kuberl)、`DEPLOY`(colocate|disagg)、模型。
+参数详解见 [`remote_agent_run_config.md`](./remote_agent_run_config.md)。两模式共同点：`--harbor-adapter-public-host $(hostname -i)`（端点A，非 0.0.0.0）、`override_claim_image:false`、每 prompt 的 `metadata.sandbox_set_name`。
+**DP = `GPUS/(TP*PP)`，`GLOBAL_BATCH_SIZE` 须为 DP 的倍数**（2 GPU、TP2→DP1，`GLOBAL_BATCH_SIZE=2` 即可）。
 
-> 本节 A/B 两模式均为 **colocate**（`--colocate`，训推共享同一组 GPU、轮转 offload）。改用分离式（训推分离）见 §4.1。
+> 本节 A/B 均为 **colocate**（训推共享 GPU、轮转 offload）。训推分离见 §4.1。
 
-### 模式 A —— 进程内 local-trial
+### 模式 A —— 进程内 local-trial（`MODE=local`）
 ```bash
 kubectl exec -n default $POD -- bash -lc '
 cd /root/slime
-export E2B_API_KEY=<admin key>
-export HF_CKPT=/root/Qwen2.5-0.5B-Instruct
-export GPUS=2 ROLLOUT_GPUS_PER_ENGINE=2 TP=2
-export ROLLOUT_BATCH_SIZE=1 N_SAMPLES_PER_PROMPT=2 GLOBAL_BATCH_SIZE=2 NUM_ROLLOUT=1
-setsid bash examples/remote_agent/run_swebench_e2b.sh > /root/slime/run.log 2>&1 </dev/null & disown'
+export MODE=local DEPLOY=colocate GPUS=2 TP=2 GLOBAL_BATCH_SIZE=2 E2B_API_KEY=<admin key>
+setsid bash examples/remote_agent/run_swebench.sh > /root/slime/run.log 2>&1 </dev/null & disown'
 ```
 
-### 模式 B —— 经 kube-rl server
-先冒烟（curl + oracle，验证 claim/envd/exec，**不需 LLM**；注意用 `sandbox_set_name`+`override_claim_image:false`，`true` 会触发 ACK 不支持的模板构建 → `404`）：
+### 模式 B —— 经 kube-rl server（`MODE=kuberl`）
+先冒烟（curl + oracle，验证 claim/envd/exec，**不需 LLM**；用 `sandbox_set_name`+`override_claim_image:false`，`true` 会触发 ACK 不支持的模板构建 → `404`）：
 ```bash
 cd /var/model-dataset/swe-bench-verified && tar czf /tmp/t.tgz astropy__astropy-14309
 cat > /tmp/meta.json <<'EOF'
@@ -131,63 +128,46 @@ EOF
 KUBE_RL=http://kube-rl.kube-rl.svc.cluster.local:8080
 curl -s -X POST $KUBE_RL/api/v1/runs/async -F "metadata=</tmp/meta.json" -F "task_archive=@/tmp/t.tgz"   # → queued → completed, reward 1.0
 ```
-再跑 slime（内联命令，去掉 `--harbor-use-local-trial`，加 server-url）：
+再跑 slime（`MODE=kuberl`，slime 侧无需 E2B）：
 ```bash
-python train_remote_agent.py "${MODEL_ARGS[@]}" \
-  --custom-generate-function-path slime.rollout.remote_agent.generate.generate_with_harbor \
-  --harbor-server-url http://kube-rl.kube-rl.svc.cluster.local:8080 --harbor-max-retries 3 \
-  --harbor-adapter-public-host $(hostname -i) --harbor-agent-name swe-agent \
-  --harbor-model-name openai/Qwen2.5-0.5B-Instruct \
-  --harbor-task-path-template "/var/model-dataset/swe-bench-verified/{instance_id}" \
-  --harbor-env-kwargs '{"override_claim_image": false}' \
-  --hf-checkpoint /root/Qwen2.5-0.5B-Instruct --ref-load /var/model/Qwen2.5-0.5B_torch_dist \
-  --prompt-data .../small_prompts.jsonl --input-key prompt --rollout-global-dataset \
-  --num-rollout 1 --rollout-batch-size 1 --n-samples-per-prompt 2 --global-batch-size 2 \
-  --colocate --actor-num-gpus-per-node 2 --rollout-num-gpus-per-engine 2 \
-  --tensor-model-parallel-size 2 --sglang-mem-fraction-static 0.5 --sglang-disable-cuda-graph ... --advantage-estimator grpo ...
+kubectl exec -n default $POD -- bash -lc '
+cd /root/slime
+export MODE=kuberl DEPLOY=colocate GPUS=2 TP=2 GLOBAL_BATCH_SIZE=2
+setsid bash examples/remote_agent/run_swebench.sh > /root/slime/run.log 2>&1 </dev/null & disown'
 ```
 
 ### 4.1 分离式部署（训推分离，不带 `--colocate`）
 
 > 本节为参数规则推导的改法（链路其余部分与 A/B 完全一致），成功判据同下文“成功证据”。
 
-分离式 = 去掉 `--colocate`，训练卡（`--actor-num-gpus-per-node`）与推理卡（`--rollout-num-gpus`）分开划，
-**总 GPU = actor 卡 + rollout 卡**（head 只有 8 卡，超出需给 RayCluster 加 worker 组）。
-专用脚本：`examples/remote_agent/run_swebench_e2b_disagg.sh`（与 colocate 版唯一区别：无 `--colocate`，改为
-`--rollout-num-gpus $ROLLOUT_GPUS`，`SGLANG_MEM_FRACTION` 默认 0.8）。与 colocate 的差异：
+分离式 = `DEPLOY=disagg`（脚本去掉 `--colocate`，加 `--rollout-num-gpus $ROLLOUT_GPUS`），训练卡与推理卡分开划，
+**总 GPU = `GPUS`(actor) + `ROLLOUT_GPUS`(rollout)**（head 只有 8 卡，超出需给 RayCluster 加 worker 组）。与 colocate 的差异：
 
 | 项 | colocate | 分离式 |
 |---|---|---|
-| 脚本 | `run_swebench_e2b.sh`（`--colocate`） | `run_swebench_e2b_disagg.sh`（需 `ROLLOUT_GPUS`）|
+| 开关 | `DEPLOY=colocate` | `DEPLOY=disagg`（需 `ROLLOUT_GPUS`）|
 | 训推切换 | 轮转 offload/onload | 无，天然并行 |
-| `SGLANG_MEM_FRACTION` | 需给训练留显存（0.4~0.5） | rollout 独占卡，可调高（如 0.8）|
-| `global-batch-size` | 同左 | 仍须为 DP 的倍数，DP = actor 卡 ÷ TP |
+| `SGLANG_MEM` | 需给训练留显存（0.4~0.5；27B 0.2） | rollout 独占卡，可调高（如 0.8）|
+| `GLOBAL_BATCH_SIZE` | 须为 DP 的倍数 | 同左，DP = `GPUS/(TP*PP)` |
 
-**模式 A（local-trial）分离式，0.5B，共 4 卡**（actor 2 卡 TP=2 → DP=1；rollout 2 卡 TP=2 一个引擎）：
+**模式 A（local-trial）分离式，0.5B，共 4 卡**（actor 2 卡 TP=2→DP=1；rollout 2 卡 TP=2 一个引擎）：
 ```bash
 kubectl exec -n default $POD -- bash -lc '
 cd /root/slime
-export E2B_API_KEY=<admin key>
-export HF_CKPT=/root/Qwen2.5-0.5B-Instruct
-export GPUS=2 TP=2 ROLLOUT_GPUS=2 ROLLOUT_GPUS_PER_ENGINE=2 SGLANG_MEM_FRACTION=0.8
-export ROLLOUT_BATCH_SIZE=1 N_SAMPLES_PER_PROMPT=2 GLOBAL_BATCH_SIZE=2 NUM_ROLLOUT=1
-setsid bash examples/remote_agent/run_swebench_e2b_disagg.sh > /root/slime/run_disagg.log 2>&1 </dev/null & disown'
+export MODE=local DEPLOY=disagg GPUS=2 TP=2 ROLLOUT_GPUS=2 SGLANG_MEM=0.8 GLOBAL_BATCH_SIZE=2 E2B_API_KEY=<admin key>
+setsid bash examples/remote_agent/run_swebench.sh > /root/slime/run_disagg.log 2>&1 </dev/null & disown'
 ```
 
-**模式 B（kube-rl）分离式**：内联命令把 `--colocate --actor-num-gpus-per-node 2 ...` 换成：
-```bash
-  --actor-num-gpus-per-node 2 --rollout-num-gpus 2 --rollout-num-gpus-per-engine 2 \
-```
-（去掉 `--colocate`，其余不变）。
+**模式 B（kube-rl）分离式**：同上把 `MODE=local ... E2B_API_KEY=...` 换成 `MODE=kuberl`（其余不变）。
 
 **27B 分离式（8 卡刚好）**：actor 4 卡 TP=4 + rollout 4 卡 TP=4：
 ```bash
-export MODEL_PRESET=qwen3.5-27B HF_CKPT=/root/Qwen3.6-27B REF_LOAD=/root/Qwen3.6-27B_torch_dist MODEL_NAME=openai/Qwen3.6-27B
-export GPUS=4 TP=4 ROLLOUT_GPUS=4 ROLLOUT_GPUS_PER_ENGINE=4 SGLANG_MEM_FRACTION=0.8
-export ROLLOUT_BATCH_SIZE=1 N_SAMPLES_PER_PROMPT=2 GLOBAL_BATCH_SIZE=2 NUM_ROLLOUT=1
-setsid bash examples/remote_agent/run_swebench_e2b_disagg.sh --apply-chat-template > /root/slime/run_27b_disagg.log 2>&1 </dev/null &
+export MODE=kuberl DEPLOY=disagg MODEL_PRESET=qwen3.5-27B \
+  HF_CKPT=/root/Qwen3.6-27B REF_LOAD=/root/Qwen3.6-27B_torch_dist MODEL_NAME=openai/Qwen3.6-27B \
+  GPUS=4 TP=4 ROLLOUT_GPUS=4 SGLANG_MEM=0.8 APPLY_CHAT_TEMPLATE=1 GLOBAL_BATCH_SIZE=2
+setsid bash examples/remote_agent/run_swebench.sh > /root/slime/run_27b_disagg.log 2>&1 </dev/null &
 ```
-> 27B 主机内存要求不变（仍需 head `memory` 800Gi）。rollout 卡数想更多只能给 RayCluster 加 worker pod（yaml 加 `workerGroupSpecs`，同样 toleration + `nvidia.com/gpu`），Ray 会自动把多出的 bundle 调度过去。
+> 注意 27B actor 用 `TP4×PP2=8` 卡时无法再拆出 rollout 卡；上面 actor 用 `TP4×PP1=4` 卡（DP1）+ rollout 4 卡凑满 8。主机内存仍需 head `memory` 800Gi。rollout 想要更多卡只能给 RayCluster 加 `workerGroupSpecs`（同 toleration + `nvidia.com/gpu`）。
 
 ### 成功证据（两模式一致的因果链，带时间戳）
 ```
@@ -225,13 +205,16 @@ step 0:    train_rollout_logprob_abs_diff=0.016~0.019, grad_norm=0.0, global_bat
    ```
 5. **200GiB pod 内存不够**：27B Megatron init 时 8 个 actor ×~20GB + sglang → 194.8/200GB → Ray OOM kill。GPU 显存没问题（TP4，13GB/卡余 80GB）。**把 RayCluster head `memory` 调到 800Gi（节点 ~2TB）后重建 head pod**。用 `0b8fe634` 镜像重建则 `train_remote_agent.py` 修复已内置，无需再打补丁；但 `/root` 本地状态（mbridge、ckpt、HF 副本）会丢，需重装/重拷/重转（HF 仍在 ossfs 持久）。
 
-27B mode-A 启动命令（8 GPU / TP4 / 低 mem-fraction 留余量）：
+6. **GPU 显存不够（CUDA OOM）**：27B colocate 时 sglang 与 27B 优化器抢显存；**TP 上限 4，单靠 TP 差 ~2GB**。解法：加 `PP=2`（拆层降单卡权重）+ 降 `SGLANG_MEM=0.2`。
+
+27B colocate 启动命令（8 GPU / **TP4×PP2** / `SGLANG_MEM=0.2`，实测通过的配置）：
 ```bash
-export MODEL_PRESET=qwen3.5-27B HF_CKPT=/root/Qwen3.6-27B REF_LOAD=/root/Qwen3.6-27B_torch_dist MODEL_NAME=openai/Qwen3.6-27B
-export GPUS=8 TP=4 ROLLOUT_GPUS_PER_ENGINE=4 SGLANG_MEM_FRACTION=0.4
-export ROLLOUT_BATCH_SIZE=1 N_SAMPLES_PER_PROMPT=2 GLOBAL_BATCH_SIZE=2 NUM_ROLLOUT=1
-setsid bash examples/remote_agent/run_swebench_e2b.sh --apply-chat-template > /root/slime/run_27b.log 2>&1 </dev/null &
+export MODE=kuberl DEPLOY=colocate MODEL_PRESET=qwen3.5-27B \
+  HF_CKPT=/root/Qwen3.6-27B REF_LOAD=/root/Qwen3.6-27B_torch_dist MODEL_NAME=openai/Qwen3.6-27B \
+  GPUS=8 TP=4 PP=2 SGLANG_MEM=0.2 APPLY_CHAT_TEMPLATE=1 GLOBAL_BATCH_SIZE=2
+setsid bash examples/remote_agent/run_swebench.sh > /root/slime/run_27b.log 2>&1 </dev/null &
 ```
+（`MODE=local` 亦可，加 `E2B_API_KEY=<admin key>` 即可。）
 
 ## 6. 踩坑速查
 
@@ -300,3 +283,26 @@ spec:
 ```
 > 实测：kube-rl 与 mode A 共用同一 `sandbox-manager`，故在 `default` ns 预建的池两种模式都能 claim；
 > `override_claim_image:true` 会触发 ACK 不支持的模板构建（404），务必用**预建池 + `sandbox_set_name` + `override_claim_image:false`**。
+
+### 8.4 K8s 权限 / kubeconfig（仅**非 E2B** 环境需要）
+
+- **E2B 环境（本 runbook 的两种模式）不需要 kubeconfig**：slime/harbor 只通过 HTTP 调用 `sandbox-manager`（mode A）或 `kube-rl` server（mode B），sandbox 的 Pod 生命周期由它们负责，slime 侧无需直接访问 K8s API。
+- **非 E2B 环境**（harbor 的环境后端直接在 K8s 里**创建 Pod / Job** 来跑 agent，例如 kubernetes-native 环境）：进程需要 K8s API 访问权限，这就是 `examples/remote_agent/kubeconfig` 的用途。
+- **推荐做法：不要挂静态 kubeconfig（凭证入库/入镜像有安全隐患），改用 RayCluster ServiceAccount 的 in-cluster RBAC**——给 head 用的 SA（本 runbook 里是 `rayclustertest`）在目标 ns 建 `Role`/`RoleBinding`，Pod 内的客户端会自动用挂载的 SA token（in-cluster config），无需任何 kubeconfig 文件、也无需设 `KUBECONFIG`。
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: slime-pod-job-manager, namespace: default}   # = 创建 agent Pod/Job 的目标 ns
+rules:
+- {apiGroups: [""],      resources: [pods, pods/log, pods/exec], verbs: [create, get, list, watch, delete]}
+- {apiGroups: ["batch"], resources: [jobs],                      verbs: [create, get, list, watch, delete]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: slime-pod-job-manager, namespace: default}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: slime-pod-job-manager}
+subjects:
+- {kind: ServiceAccount, name: rayclustertest, namespace: default}   # RayCluster head 的 SA
+```
+> 应用后即可**从仓库/镜像移除 `kubeconfig`**（并加入 `.gitignore`）；如目标 ns 与 head 不同 ns，Role/RoleBinding 建到目标 ns、subject 仍指向 head SA 即可。

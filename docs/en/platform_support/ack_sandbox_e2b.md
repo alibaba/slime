@@ -167,11 +167,11 @@ resolving the pool.
 ## 5. Run
 
 ```bash
-export E2B_API_KEY=<ACK sandbox admin key>
-bash examples/remote_agent/run_swebench_e2b.sh
+MODE=local DEPLOY=colocate GPUS=2 TP=2 GLOBAL_BATCH_SIZE=2 \
+  E2B_API_KEY=<ACK sandbox admin key> bash examples/remote_agent/run_swebench.sh
 ```
 
-`examples/remote_agent/run_swebench_e2b.sh` sets the required env and flags. The essential ones:
+The unified launcher `examples/remote_agent/run_swebench.sh` sets the required flags via env vars (see [`remote_agent_run_config.md`](./remote_agent_run_config.md)). The essential ones:
 
 | Flag / env | Value | Why |
 |------------|-------|-----|

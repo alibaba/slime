@@ -62,19 +62,22 @@ Slime Ray Cluster
 
 ## Quick Start
 
-### Remote Mode
+All runs go through the unified launcher `run_swebench.sh` (three switches:
+`MODE`=local|kuberl, `DEPLOY`=colocate|disagg, and the model via env). Full
+parameter reference: `docs/zh/platform_support/remote_agent_run_config.md`.
+
+### Via kube-rl server (MODE=kuberl)
 
 ```bash
-export LOCAL_IP=10.0.30.11   # IP reachable from Harbor containers
-bash examples/remote_agent/harbor_qwen.sh
+MODE=kuberl DEPLOY=colocate GPUS=2 TP=2 GLOBAL_BATCH_SIZE=2 \
+  bash examples/remote_agent/run_swebench.sh
 ```
 
-### Local Trial Mode
-
-No `LOCAL_IP` needed since the agent runs in the same process:
+### In-process local trial (MODE=local)
 
 ```bash
-bash examples/remote_agent/harbor_local_trial.sh
+MODE=local DEPLOY=colocate GPUS=2 TP=2 GLOBAL_BATCH_SIZE=2 \
+  E2B_API_KEY=<ACK sandbox admin key> bash examples/remote_agent/run_swebench.sh
 ```
 
 Or manually:
@@ -89,6 +92,16 @@ python train_remote_agent.py \
   --hf-checkpoint /path/to/Qwen2.5-7B-Instruct \
   ... (other training params)
 ```
+
+## K8s permissions / `kubeconfig` (non-E2B only)
+
+The E2B modes (kube-rl / local-trial) need **no** kubeconfig — slime only talks HTTP
+to `sandbox-manager` / `kube-rl`, which own the sandbox Pod lifecycle. A `kubeconfig`
+is only needed in **non-E2B** environments where harbor creates K8s **Pods/Jobs**
+directly. Prefer **in-cluster RBAC** over a mounted kubeconfig: grant the RayCluster
+head ServiceAccount (`rayclustertest`) a `Role`/`RoleBinding` for pods/jobs in the
+target namespace, so the in-pod client uses the auto-mounted SA token (no kubeconfig
+file, no `KUBECONFIG`). Concrete YAML: see `docs/zh/platform_support/ack_sandbox_e2b_adapter_runbook.md` §8.4.
 
 ## Parameters
 

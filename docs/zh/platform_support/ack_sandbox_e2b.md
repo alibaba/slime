@@ -160,11 +160,11 @@ SandboxSet：
 ## 5. 运行
 
 ```bash
-export E2B_API_KEY=<ACK sandbox admin key>
-bash examples/remote_agent/run_swebench_e2b.sh
+MODE=local DEPLOY=colocate GPUS=2 TP=2 GLOBAL_BATCH_SIZE=2 \
+  E2B_API_KEY=<ACK sandbox admin key> bash examples/remote_agent/run_swebench.sh
 ```
 
-`examples/remote_agent/run_swebench_e2b.sh` 已设置所需环境与参数，关键项：
+统一启动器 `examples/remote_agent/run_swebench.sh` 用环境变量设置所需参数（详见 [`remote_agent_run_config.md`](./remote_agent_run_config.md)），关键项：
 
 | 参数 / 环境变量 | 取值 | 说明 |
 |------------|-------|-----|
