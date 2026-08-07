@@ -4,7 +4,7 @@
 输出的 prompts.jsonl 由统一启动器 ``run_swebench.sh`` 消费（按 metadata.sandbox_set_name
 路由到预建 SandboxSet）。多模态模型（如 27B）用 ``--prompt-as-messages`` 生成消息 list 格式，
 并在 run_swebench.sh 侧配 ``APPLY_CHAT_TEMPLATE=1``。参数详解见
-docs/zh/platform_support/remote_agent_run_config.md。
+examples/remote_agent/README.md（参数详解节）。
 
 Scans ``<dataset-root>/<instance_id>/task.toml`` (harbor task format) and writes
 one line per task in the format consumed by ``run_swebench.sh``:

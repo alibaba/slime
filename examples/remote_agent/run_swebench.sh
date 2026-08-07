@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unified SWE-bench remote-agent RL launcher (in-process OpenAIAdapter).
-# One script, three orthogonal switches — see docs/zh/platform_support/remote_agent_run_config.md
+# One script, three orthogonal switches — see examples/remote_agent/README.md
 #
 #   MODE   = local | kuberl     trial submission: in-process local-trial (needs E2B_*) | via kube-rl server
 #   DEPLOY = colocate | disagg  GPU layout: train+rollout share GPUs | dedicated rollout GPUs (needs ROLLOUT_GPUS)

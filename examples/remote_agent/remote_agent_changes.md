@@ -59,9 +59,11 @@ adapter 由 `generate_with_harbor` 首次调用懒启动。（修掉了 e2b base
 | `.gitignore`（+1）| 忽略项。|
 
 ### 2.5 文档
-- `docs/{en,zh}/platform_support/ack_sandbox_e2b.md`（各 +240 左右）：ACK sandbox + E2B 通用指南（已改述为 adapter 链路）。
-- `docs/zh/platform_support/ack_sandbox_e2b_adapter_runbook.md`：adapter 版端到端实测 runbook（mode A/B、27B、踩坑表）。
-- `remote_agent_design.md`（+1322）：设计文档（顶部已加"部分过时/TokenProxy→adapter"横幅）。
+所有 remote_agent 运行文档已合并进 **`examples/remote_agent/README.md`**（单一文档）：概览+架构、
+`run_swebench.sh` 参数详解、端到端 Runbook（ACK sandbox + E2B，mode A/B、27B、训推分离、踩坑、kubeconfig/RBAC）、
+容量说明与 FAQ。原 `docs/{en,zh}/platform_support/ack_sandbox_e2b.md`、`.../remote_agent_run_config.md`、
+`.../ack_sandbox_e2b_adapter_runbook.md` 已删除并入 README。
+- `remote_agent_design.md`（仓库根）：旧设计文档（顶部已加"部分过时/TokenProxy→adapter"横幅），保留。
 
 ### 2.6 示例 / 脚本、测试
 见 §5 脚本审查表；测试见 `tests/test_remote_agent/`（`test_adapter_capture.py` adapter 冒烟、`test_sandbox_set_routing.py` 路由单测）。
@@ -92,7 +94,7 @@ adapter 由 `generate_with_harbor` 首次调用懒启动。（修掉了 e2b base
 ## 5. 脚本（`examples/remote_agent/`，已完成整合）
 
 9 个新旧脚本已合并为**一个统一启动器** `run_swebench.sh`（`MODE`×`DEPLOY`×模型 三开关，见
-[`docs/zh/platform_support/remote_agent_run_config.md`](docs/zh/platform_support/remote_agent_run_config.md)）。
+README.md 的「参数详解」节）。
 
 ### ✅ 当前保留
 | 文件 | 用途 |
