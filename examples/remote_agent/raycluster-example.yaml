@@ -1,0 +1,121 @@
+# Example RayCluster for slime remote-agent RL (KubeRay).
+#
+# Apply with:
+#   export KUBECONFIG=~/.kube/config-sing
+#   kubectl apply -f examples/remote_agent/raycluster-example.yaml
+#   kubectl wait --for=condition=Ready pod -n default -l ray.io/node-type=head --timeout=300s
+#
+# Adjust for your cluster: <IMAGE> (workspace image built from docker/Dockerfile.workspace),
+# imagePullSecrets, node toleration, GPU count, and memory (0.5B ~200Gi is fine; 27B needs
+# ~800Gi). Add the worker group at the bottom for disaggregated (DEPLOY=disagg) or multi-node runs.
+#
+# IMPORTANT — model/dataset access is YOUR responsibility. The `model` and `model-dataset`
+# volumes below are just an example wiring two PVCs (ym-models / ym-dataset) to the mount points
+# the scripts default to:
+#   /var/model         <- HF checkpoints + Megatron torch_dist ckpts (HF_CKPT / REF_LOAD)
+#   /var/model-dataset <- task dataset (TASK_PATH_TEMPLATE, e.g. swe-bench-verified)
+# Replace them with however your cluster exposes storage — a PVC (create your own PVC/PV or use
+# a StorageClass), an OSS/NAS/hostPath mount, etc. The RayCluster does NOT provision storage;
+# you must pre-create the volumes and make sure they contain (or can hold) your models + tasks.
+# If you mount elsewhere, override HF_CKPT / REF_LOAD / TASK_PATH_TEMPLATE accordingly.
+---
+# The head runs `kubectl`-driven work only in non-E2B setups; for the E2B/kube-rl
+# runbook the SA just needs to exist. Bind it to kuberay-operator when the head must
+# manage RayCluster resources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rayclustertest
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kuberay-operator
+subjects:
+  - kind: ServiceAccount
+    name: rayclustertest
+    apiGroup: ""
+    namespace: default
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rayclustertest
+  namespace: default
+---
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: raycluster-slime
+  namespace: default
+spec:
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: 0.0.0.0
+    serviceType: ClusterIP
+    template:
+      spec:
+        serviceAccountName: rayclustertest
+        containers:
+        - name: ray-head
+          image: <IMAGE>                      # workspace image (see docker/Dockerfile.workspace)
+          imagePullPolicy: IfNotPresent
+          command: [service, ssh, start]      # keep the container alive; ray is started by KubeRay
+          livenessProbe:
+            exec: {command: [bash, -c, "echo success"]}
+            failureThreshold: 120
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          readinessProbe:
+            exec: {command: [bash, -c, "echo success"]}
+            failureThreshold: 10
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            limits:   {cpu: "50", memory: 800Gi, nvidia.com/gpu: "8"}
+            requests: {cpu: "50", memory: 800Gi, nvidia.com/gpu: "8"}
+          securityContext: {runAsUser: 0}
+          volumeMounts:
+          - {name: model,         mountPath: /var/model}
+          - {name: model-dataset, mountPath: /var/model-dataset}
+        imagePullSecrets:
+        - {name: <PULL_SECRET>}
+        tolerations:
+        - {key: node-role.alibabacloud.com/lingjun}   # scheduling onto the GPU pool
+        # Provide your own storage for models + dataset (see header note). These PVCs must
+        # already exist in the namespace; swap for your PVC/OSS/NAS/hostPath as appropriate.
+        volumes:
+        - {name: model,         persistentVolumeClaim: {claimName: ym-models}}    # -> /var/model  (models)
+        - {name: model-dataset, persistentVolumeClaim: {claimName: ym-dataset}}   # -> /var/model-dataset (tasks)
+
+  # --- Optional GPU worker group ---
+  # Needed for DEPLOY=disagg when total GPUs (actor + rollout) exceed the head's 8,
+  # or for multi-node training. total cluster GPUs = head(8) + replicas*8.
+  workerGroupSpecs:
+  - groupName: gpu-worker
+    replicas: 0                    # set to 1+ to add worker nodes (e.g. 1 -> 16 GPUs total)
+    minReplicas: 0
+    maxReplicas: 4
+    rayStartParams: {}
+    template:
+      spec:
+        serviceAccountName: rayclustertest
+        containers:
+        - name: ray-worker
+          image: <IMAGE>
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:   {cpu: "50", memory: 800Gi, nvidia.com/gpu: "8"}
+            requests: {cpu: "50", memory: 800Gi, nvidia.com/gpu: "8"}
+          securityContext: {runAsUser: 0}
+          volumeMounts:
+          - {name: model,         mountPath: /var/model}
+          - {name: model-dataset, mountPath: /var/model-dataset}
+        imagePullSecrets:
+        - {name: <PULL_SECRET>}
+        tolerations:
+        - {key: node-role.alibabacloud.com/lingjun}
+        # Same model/dataset storage as the head (see header note) — must be RWX so head + workers
+        # can both read it. Swap for your PVC/OSS/NAS as appropriate.
+        volumes:
+        - {name: model,         persistentVolumeClaim: {claimName: ym-models}}    # -> /var/model
+        - {name: model-dataset, persistentVolumeClaim: {claimName: ym-dataset}}   # -> /var/model-dataset

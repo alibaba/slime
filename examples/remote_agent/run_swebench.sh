@@ -37,9 +37,16 @@ GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2}"; MAX_RESP="${MAX_RESP:-2048}"
 
 HARBOR_AGENT_NAME="${HARBOR_AGENT_NAME:-swe-agent}"
 HARBOR_AGENT_KWARGS="${HARBOR_AGENT_KWARGS:-}"        # optional JSON, e.g. '{"per_instance_cost_limit": 0}'
+# Environment kwargs passed to the harbor environment. override_claim_image=true lets a single
+# generic pool serve any task image (the claim is overridden with the task's own image), so you
+# no longer need one SandboxSet per image. Set false (or bake the image into the pool) if your
+# ACK/sandbox stack is older and per-claim override still fails.
+# NOTE: assign brace-containing defaults OUTSIDE ${VAR:-...} — a `}` in the default word closes
+# the expansion early and leaves a stray `}` when the var is set (breaks JSON / the {instance_id} template).
+HARBOR_ENV_KWARGS="${HARBOR_ENV_KWARGS:-}"; [ -n "$HARBOR_ENV_KWARGS" ] || HARBOR_ENV_KWARGS='{"override_claim_image": true}'
 TASK_NAME="${TASK_NAME:-astropy__astropy-14309}"
-SANDBOX_SET="${SANDBOX_SET:-slime-sbx-astropy-14309}"
-TASK_PATH_TEMPLATE="${TASK_PATH_TEMPLATE:-/var/model-dataset/swe-bench-verified/{instance_id}}"
+SANDBOX_SET="${SANDBOX_SET:-slime-sbx-astropy-14309}"   # metadata.sandbox_set_name of the default prompt; overrides the target pool
+TASK_PATH_TEMPLATE="${TASK_PATH_TEMPLATE:-}"; [ -n "$TASK_PATH_TEMPLATE" ] || TASK_PATH_TEMPLATE='/var/model-dataset/swe-bench-verified/{instance_id}'
 PROMPT_DATA="${PROMPT_DATA:-$(pwd)/examples/remote_agent/prompts.jsonl}"
 
 KUBE_RL="${KUBE_RL:-http://kube-rl.kube-rl.svc.cluster.local:8080}"   # MODE=kuberl only
@@ -84,7 +91,7 @@ ARGS=(
   --harbor-adapter-public-host "$HEAD_IP" --harbor-adapter-port "${HARBOR_ADAPTER_PORT:-18001}"
   --harbor-agent-name "$HARBOR_AGENT_NAME" --harbor-model-name "$MODEL_NAME"
   --harbor-task-path-template "$TASK_PATH_TEMPLATE"
-  --harbor-env-kwargs '{"override_claim_image": false}'
+  --harbor-env-kwargs "$HARBOR_ENV_KWARGS"
   --prompt-data "$PROMPT_DATA" --input-key prompt --rollout-global-dataset
   --num-rollout "$NUM_ROLLOUT" --rollout-batch-size "$ROLLOUT_BATCH_SIZE" --n-samples-per-prompt "$N_SAMPLES"
   --rollout-max-response-len "$MAX_RESP" --rollout-temperature 1.0 --global-batch-size "$GLOBAL_BATCH_SIZE"
