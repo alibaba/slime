@@ -1,0 +1,38 @@
+FROM slimerl/slime:nightly-dev-20260804a
+
+# 设置工作目录
+WORKDIR /root/slime
+
+RUN cd /root/Megatron-LM && pip install -e .
+# `pip install -e /root/Megatron-LM` does not register the `megatron` namespace here
+# (it resolves to dist-packages megatron-core only), so `megatron.training` is missing for
+# Ray worker actors. Add Megatron-LM to sys.path for ALL python processes via a .pth file.
+RUN echo /root/Megatron-LM > "$(python -c 'import site; print(site.getsitepackages()[0])')/zzz_megatron_lm.pth"
+
+# 清理原有的 slime 代码
+RUN rm -rf /root/slime/*
+
+# 复制本地 /workspace 下的代码到镜像中
+# 注意：构建时需要将代码挂载或复制到构建上下文中
+COPY . /root/slime/
+
+# 重新安装 slime（开发模式，使用本地代码）
+RUN pip install -e . --no-deps
+RUN pip install shortuuid
+
+# --- Harbor: drives the external agent for slime remote-agent RL ---
+# The install pulls harbor's runtime deps (litellm, dirhash, dockerfile-parse, tenacity, ...)
+# that the local-docker environment + Trial + swe-agent need.
+# NOTE: harbor pulls openai>2.6.1 (sglang pins ==2.6.1); this was verified harmless at runtime
+# (SGLang engines load and serve fine), so we do not re-pin.
+RUN git clone --depth 1 https://github.com/alibaba/harbor.git /root/harbor && \
+    pip install -e /root/harbor
+
+# 重新安装 int4_qat 内核（如果存在）
+RUN if [ -d "/root/slime/slime/backends/megatron_utils/kernels/int4_qat" ]; then \
+        cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
+        pip install . --no-build-isolation; \
+    fi
+
+# 设置工作目录
+WORKDIR /root/slime

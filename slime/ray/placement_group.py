@@ -1,5 +1,6 @@
 import copy
 import logging
+import os
 import socket
 
 import ray
@@ -227,10 +228,14 @@ def create_training_models(args, pgs, rollout_manager, actor_cls=None):
 def create_rollout_manager(args, pg):
     from .rollout import RolloutManager
 
+    # In Harbor mode the harbor Trial (and whatever sandbox client its environment drives)
+    # runs *inside* the RolloutManager actor, which does not inherit the driver's environment.
+    # Forward HARBOR_*/E2B_* connection env vars so the in-actor environment can configure itself.
+    _forward_env = {k: v for k, v in os.environ.items() if k.startswith(("E2B_", "HARBOR_"))}
     rollout_manager_options = {
         "num_cpus": 1,
         "num_gpus": 0,
-        "runtime_env": {"env_vars": add_default_ray_env_vars()},
+        "runtime_env": {"env_vars": {**add_default_ray_env_vars(), **_forward_env}},
     }
     if getattr(args, "rollout_data_transport", "object-store") == "nixl":
         rollout_manager_options["enable_tensor_transport"] = True

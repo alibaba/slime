@@ -1472,6 +1472,133 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
 
             return parser
 
+        def add_harbor_arguments(parser):
+            """Add Harbor external-agent rollout integration arguments."""
+            parser.add_argument(
+                "--harbor-timeout",
+                type=float,
+                default=1800.0,
+                help="Timeout in seconds for Harbor trial execution.",
+            )
+
+            # Agent configuration
+            parser.add_argument(
+                "--harbor-agent-name",
+                type=str,
+                default=None,
+                help="Name of a built-in Harbor agent (e.g. 'swe-agent').",
+            )
+            parser.add_argument(
+                "--harbor-agent-import-path",
+                type=str,
+                default=None,
+                help="Python import path for custom agent (e.g. 'my_agents:MyAgent').",
+            )
+            parser.add_argument(
+                "--harbor-model-name",
+                type=str,
+                default=None,
+                help="LLM model name passed to the remote agent.",
+            )
+            parser.add_argument(
+                "--harbor-agent-kwargs",
+                type=json.loads,
+                default="{}",
+                help="JSON-encoded dict of extra kwargs for the agent.",
+            )
+
+            # Environment configuration
+            parser.add_argument(
+                "--harbor-env-overrides",
+                type=json.loads,
+                default="{}",
+                help="JSON-encoded dict of env vars forwarded to the remote agent.",
+            )
+            parser.add_argument(
+                "--harbor-env-import-path",
+                type=str,
+                default="harbor.environments.local_docker:LocalDockerEnvironment",
+                help="Python import path for the environment class (e.g., harbor.environments.local_docker:LocalDockerEnvironment).",
+            )
+            parser.add_argument(
+                "--harbor-env-kwargs",
+                type=json.loads,
+                default="{}",
+                help="JSON-encoded dict of kwargs for the environment constructor.",
+            )
+
+            # Task configuration
+            parser.add_argument(
+                "--harbor-task-path-template",
+                type=str,
+                default="/home/slime/dataset-tasks/{instance_id}",
+                help="Task path template with {instance_id} placeholder.",
+            )
+
+            # Adapter (in-process OpenAI adapter) configuration.
+            # The adapter runs inside the RolloutManager actor and serves the
+            # remote agent's OpenAI calls (endpoint A). It reaches sglang via
+            # the router (endpoint B) using --sglang-router-ip/-port.
+            parser.add_argument(
+                "--harbor-adapter-bind-host",
+                type=str,
+                default="0.0.0.0",
+                help="Bind host for the in-process OpenAI adapter HTTP server.",
+            )
+            parser.add_argument(
+                "--harbor-adapter-port",
+                type=int,
+                default=18001,
+                help=(
+                    "Fixed port for the adapter HTTP server. Pick a port outside "
+                    "the sglang-router auto-select range (3000-4000). 0 = auto-select."
+                ),
+            )
+            parser.add_argument(
+                "--harbor-adapter-public-host",
+                type=str,
+                default=None,
+                help=(
+                    "Head-node address the remote Harbor sandbox uses to reach "
+                    "the adapter (endpoint A). Must be reachable from outside the "
+                    "Ray cluster. Falls back to the LOCAL_IP env var."
+                ),
+            )
+
+            # SandboxSet routing (per-task pod-size class -> SandboxSet name)
+            parser.add_argument(
+                "--harbor-sandbox-set-key",
+                type=str,
+                default="sandbox_set_name",
+                help=(
+                    "Environment-kwarg key under which the resolved SandboxSet / "
+                    "pool name is passed to the Harbor environment. Set to match "
+                    "what the environment expects."
+                ),
+            )
+            parser.add_argument(
+                "--harbor-sandbox-class-key",
+                type=str,
+                default="sandbox_class",
+                help=(
+                    "Field name holding the per-task pod-size class. Looked up in "
+                    "the sample metadata and in the task's task.toml "
+                    "([metadata]/[environment]/[task] and top level)."
+                ),
+            )
+            parser.add_argument(
+                "--harbor-sandbox-set-name-template",
+                type=str,
+                default="{sandbox_class}",
+                help=(
+                    "Template that converts the size class into a SandboxSet name, "
+                    "e.g. 'swebench-verified-{sandbox_class}'. When no class is "
+                    "found the key is omitted and the environment uses its default."
+                ),
+            )
+
+            return parser
+
         def add_ci_arguments(parser):
             parser.add_argument(
                 "--ci-test",
@@ -1511,6 +1638,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
         parser = add_rollout_buffer_arguments(parser)
+        parser = add_harbor_arguments(parser)
         parser = add_mtp_training_arguments(parser)
         parser = add_ci_arguments(parser)
         parser = add_custom_megatron_plugins_arguments(parser)
