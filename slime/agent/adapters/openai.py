@@ -285,9 +285,21 @@ def _build_reply_parts(parsed: ParsedModelOutput, finish: str) -> tuple[dict[str
 
 
 def _request_session_id(request: web.Request, body: dict) -> str:
-    """Resolve sid: Authorization: Bearer <sid> first (where an OpenAI client
-    propagates its API key), then body-level hints (metadata.session_id / user)."""
-    return sid_from_bearer(request) or sid_from_body(body) or "default"
+    """Resolve sid from explicit per-request routing before shared credentials.
+
+    LiteLLM sends ``session_id`` both as ``X-Session-ID`` and as a top-level
+    request field. Prefer those over the bearer token because concurrent local
+    Harbor trials can share a process-level ``OPENAI_API_KEY``.
+    """
+    header_sid = request.headers.get("X-Session-ID", "").strip()
+    body_sid = body.get("session_id")
+    return (
+        header_sid
+        or (str(body_sid) if body_sid else None)
+        or sid_from_bearer(request)
+        or sid_from_body(body)
+        or "default"
+    )
 
 
 def _usage(in_tok: int, out_tok: int) -> dict[str, int]:

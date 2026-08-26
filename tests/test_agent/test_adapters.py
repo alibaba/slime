@@ -85,11 +85,25 @@ def test_anthropic_session_id_prefers_bearer_then_api_key():
     assert anthropic._request_session_id(_Headers({})) == "default"
 
 
-def test_openai_session_id_prefers_bearer_then_body():
+def test_openai_session_id_prefers_explicit_routing_then_bearer_and_body():
     req = _Headers({})
     assert openai._request_session_id(req, {"metadata": {"session_id": "meta"}, "user": "u"}) == "meta"
     assert openai._request_session_id(req, {"user": "u"}) == "u"
     assert openai._request_session_id(_Headers({"Authorization": "Bearer bsid"}), {"user": "u"}) == "bsid"
+    assert (
+        openai._request_session_id(
+            _Headers({"Authorization": "Bearer shared", "X-Session-ID": "header-sid"}),
+            {"session_id": "body-sid"},
+        )
+        == "header-sid"
+    )
+    assert (
+        openai._request_session_id(
+            _Headers({"Authorization": "Bearer shared"}),
+            {"session_id": "body-sid"},
+        )
+        == "body-sid"
+    )
     assert openai._request_session_id(req, {}) == "default"
 
 
