@@ -37,9 +37,11 @@ Usage (local)::
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
+import re
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +50,19 @@ from typing import Any
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _make_k8s_resource_name(value: str, max_length: int = 63) -> str:
+    """Convert an identifier to a stable DNS-1123 Kubernetes resource name."""
+    raw = str(value)
+    normalized = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:8]
+    if not normalized:
+        return f"trial-{digest}"
+    if len(normalized) <= max_length:
+        return normalized
+    prefix = normalized[: max_length - len(digest) - 1].rstrip("-")
+    return f"{prefix}-{digest}"
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +277,7 @@ async def run_local_trial(
     timeout: float = 1800.0,
     timeout_multiplier: float = 1.0,
     environment_import_path: str = "harbor.environments.local_docker:LocalDockerEnvironment",
+    trial_name: str | None = None,
 ) -> HarborRunResult:
     """Run a Harbor Trial directly in the current Python process.
 
@@ -279,6 +295,8 @@ async def run_local_trial(
         timeout_multiplier: Multiplier for timeout values.
         environment_import_path: Import path for the environment class
             (e.g., "harbor.environments.ack:ACKEnvironment").
+        trial_name: Human-readable trial name. Defaults to the task directory name
+            plus a unique suffix.
 
     Returns:
         A ``HarborRunResult`` with run_id, status, and rewards.
@@ -295,10 +313,11 @@ async def run_local_trial(
     from harbor.trial.trial import Trial
 
     verifier = verifier or HarborVerifierConfig()
-    run_id = f"local-{shortuuid.uuid()}"
+    task_dir = Path(task_path).resolve()
+    candidate_name = trial_name or f"{task_dir.name}-{shortuuid.uuid()}"
+    run_id = _make_k8s_resource_name(candidate_name)
     logger.info("[HarborTrial][%s] Starting local trial, task_path=%s", run_id, task_path)
 
-    task_dir = Path(task_path).resolve()
     if not task_dir.is_dir():
         logger.error("[HarborTrial][%s] Task directory not found: %s", run_id, task_dir)
         return HarborRunResult(

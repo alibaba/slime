@@ -238,6 +238,7 @@ async def _generate_with_harbor_async(
                 environment_kwargs=env_kwargs,
                 timeout=args.harbor_timeout,
                 environment_import_path=args.harbor_env_import_path,
+                trial_name=f"{instance_id}-{sid.rsplit('-', 1)[-1]}",
             )
         else:
             client = state.ensure_client(args)

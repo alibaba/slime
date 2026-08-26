@@ -22,7 +22,16 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_HARBOR_CLIENT_PY = _REPO_ROOT / "slime" / "rollout" / "remote_agent" / "harbor_client.py"
 _GENERATE_PY = _REPO_ROOT / "slime" / "rollout" / "remote_agent" / "generate.py"
+
+
+def _load_harbor_client_module():
+    spec = importlib.util.spec_from_file_location("_harbor_client_under_test", _HARBOR_CLIENT_PY)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _install_stub(name: str, **attrs) -> None:
@@ -56,7 +65,22 @@ def _load_generate_module():
     return mod
 
 
+client = _load_harbor_client_module()
 gen = _load_generate_module()
+
+
+def test_k8s_resource_name_is_readable_and_dns_safe():
+    assert client._make_k8s_resource_name("Pallets__Flask-5014/ABC_123") == "pallets-flask-5014-abc-123"
+
+
+def test_k8s_resource_name_truncates_with_stable_hash():
+    raw = f"Task__{'x' * 80}-ABC_123"
+    name = client._make_k8s_resource_name(raw)
+
+    assert len(name) <= 63
+    assert name == client._make_k8s_resource_name(raw)
+    assert name.startswith("task-")
+    assert name[-9] == "-"
 
 
 def _sample(metadata: dict):
