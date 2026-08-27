@@ -27,8 +27,9 @@ Usage::
 For local trial mode (no remote Harbor server) add ``--harbor-use-local-trial``.
 """
 
-from slime.utils.arguments import parse_args
 from train import train
+
+from slime.utils.arguments import parse_args
 
 if __name__ == "__main__":
     args = parse_args()

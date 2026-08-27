@@ -92,9 +92,17 @@ def instance_suffix(instance_id: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dataset-root", default=DEFAULT_DATASET_ROOT, help=f"Harbor task root (default: {DEFAULT_DATASET_ROOT})")
-    parser.add_argument("--output", default=str(DEFAULT_OUTPUT), help=f"Output prompts JSONL (default: {DEFAULT_OUTPUT})")
-    parser.add_argument("--sandbox-set-prefix", default=DEFAULT_SET_PREFIX, help=f"SandboxSet name prefix (default: {DEFAULT_SET_PREFIX})")
+    parser.add_argument(
+        "--dataset-root", default=DEFAULT_DATASET_ROOT, help=f"Harbor task root (default: {DEFAULT_DATASET_ROOT})"
+    )
+    parser.add_argument(
+        "--output", default=str(DEFAULT_OUTPUT), help=f"Output prompts JSONL (default: {DEFAULT_OUTPUT})"
+    )
+    parser.add_argument(
+        "--sandbox-set-prefix",
+        default=DEFAULT_SET_PREFIX,
+        help=f"SandboxSet name prefix (default: {DEFAULT_SET_PREFIX})",
+    )
     parser.add_argument(
         "--set-name-from",
         choices=["suffix", "image"],
@@ -103,7 +111,11 @@ def main() -> None:
         "(default, matches runbook naming slime-sbx-astropy-14309); 'image' = docker_image short name",
     )
     parser.add_argument("--limit", type=int, default=0, help="Only convert the first N tasks (0 = all)")
-    parser.add_argument("--prompt-as-messages", action="store_true", help='Emit prompt as [{"role": "user", "content": ...}] (multimodal models + --apply-chat-template)')
+    parser.add_argument(
+        "--prompt-as-messages",
+        action="store_true",
+        help='Emit prompt as [{"role": "user", "content": ...}] (multimodal models + --apply-chat-template)',
+    )
     args = parser.parse_args()
 
     dataset_root = Path(args.dataset_root)
@@ -136,7 +148,11 @@ def main() -> None:
             continue
 
         prompt = [{"role": "user", "content": problem}] if args.prompt_as_messages else problem
-        short = instance_suffix(instance_id) if args.set_name_from == "suffix" else image_short_name(instance_id, docker_image)
+        short = (
+            instance_suffix(instance_id)
+            if args.set_name_from == "suffix"
+            else image_short_name(instance_id, docker_image)
+        )
         records.append(
             {
                 "prompt": prompt,

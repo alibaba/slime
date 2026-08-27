@@ -73,6 +73,7 @@ def _make_k8s_resource_name(value: str, max_length: int = 63) -> str:
 @dataclass
 class HarborAgentConfig:
     """Agent configuration to submit with a run request."""
+
     name: str | None = None
     import_path: str | None = None
     model_name: str | None = None
@@ -83,12 +84,14 @@ class HarborAgentConfig:
 @dataclass
 class HarborVerifierConfig:
     """Verifier configuration to submit with a run request."""
+
     disable: bool = False
 
 
 @dataclass
 class HarborRunResult:
     """Result of a Harbor agent run."""
+
     run_id: str
     status: str  # completed | failed | timeout | error
     rewards: dict[str, float] | None = None
@@ -180,9 +183,7 @@ class HarborClient:
         # task_path against its own workdir, so an absolute client-side path would
         # not exist there.
         try:
-            archive_bytes, dir_name = await asyncio.to_thread(
-                _create_task_archive, task_path
-            )
+            archive_bytes, dir_name = await asyncio.to_thread(_create_task_archive, task_path)
         except FileNotFoundError as e:
             return HarborRunResult(
                 run_id="",
@@ -247,10 +248,7 @@ class HarborClient:
                 run_id="",
                 status="error",
                 rewards={"reward": 0.0},
-                error_message=(
-                    f"Server returned HTTP {response.status_code}: "
-                    f"{response.text}"
-                ),
+                error_message=(f"Server returned HTTP {response.status_code}: " f"{response.text}"),
             )
 
         data = response.json()
@@ -302,14 +300,10 @@ async def run_local_trial(
         A ``HarborRunResult`` with run_id, status, and rewards.
     """
     import shortuuid
-
-    from harbor.models.trial.config import (
-        AgentConfig as TrialAgentConfig,
-        EnvironmentConfig as TrialEnvironmentConfig,
-        TaskConfig,
-        TrialConfig,
-        VerifierConfig as TrialVerifierConfig,
-    )
+    from harbor.models.trial.config import AgentConfig as TrialAgentConfig
+    from harbor.models.trial.config import EnvironmentConfig as TrialEnvironmentConfig
+    from harbor.models.trial.config import TaskConfig, TrialConfig
+    from harbor.models.trial.config import VerifierConfig as TrialVerifierConfig
     from harbor.trial.trial import Trial
 
     verifier = verifier or HarborVerifierConfig()

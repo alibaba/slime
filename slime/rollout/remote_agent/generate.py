@@ -102,9 +102,7 @@ def _read_task_sandbox_class(task_path: str, class_key: str) -> str | None:
     return None
 
 
-def _resolve_sandbox_set_name(
-    args: Namespace, sample: Sample, task_path: str
-) -> str | None:
+def _resolve_sandbox_set_name(args: Namespace, sample: Sample, task_path: str) -> str | None:
     """Resolve the target SandboxSet / pool name for this task.
 
     Precedence:
@@ -279,12 +277,16 @@ async def _generate_with_harbor_async(
             logger.warning("[Harbor][%s] No turns recorded — dropping sample.", sid)
             return [_make_aborted_sample(sample, reason="adapter_session_empty", metadata=trial_metadata)]
 
-        logger.info("[Harbor][%s] Finished: status=%s reward=%.4f samples=%d", sid, result.status, reward, len(samples))
+        logger.info(
+            "[Harbor][%s] Finished: status=%s reward=%.4f samples=%d", sid, result.status, reward, len(samples)
+        )
         return samples
 
     except Exception as e:
         logger.warning("[Harbor][%s] Rollout failed: %s: %s", sid, type(e).__name__, e)
-        return [_make_aborted_sample(sample, reason=f"exception:{type(e).__name__}", metadata={"instance_id": instance_id})]
+        return [
+            _make_aborted_sample(sample, reason=f"exception:{type(e).__name__}", metadata={"instance_id": instance_id})
+        ]
     finally:
         # Cleanup only, idempotent (also drops any leftover trajectory state).
         await service.adapter.drop_session(sid)
@@ -387,9 +389,7 @@ async def _submit_with_retry(
             if result.status == "completed":
                 return result
 
-            last_error = RuntimeError(
-                f"Harbor run {result.status}: {result.error_message or 'unknown'}"
-            )
+            last_error = RuntimeError(f"Harbor run {result.status}: {result.error_message or 'unknown'}")
             logger.warning(
                 "Trial %s attempt %d/%d %s: %s",
                 sid,

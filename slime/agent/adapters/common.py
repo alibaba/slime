@@ -514,8 +514,7 @@ async def call_sglang_generate(
             if 500 <= e.status < 600 and attempt < max_retries:
                 delay = adapter.sglang_retry_base_delay * (2**attempt)
                 logger.warning(
-                    "[%s] sid=%s retrying sglang request after HTTP %d "
-                    "(attempt %d/%d, delay %.1fs)",
+                    "[%s] sid=%s retrying sglang request after HTTP %d " "(attempt %d/%d, delay %.1fs)",
                     adapter.log_prefix,
                     session_id,
                     e.status,

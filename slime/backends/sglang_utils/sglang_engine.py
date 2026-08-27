@@ -572,12 +572,12 @@ class SGLangEngine(RayActor):
 
         # Extract token_ids and log_probs from meta_info
         meta_info = result.get("meta_info", {})
-        
+
         # output_token_logprobs is a list of [log_prob, token_id] pairs
         output_token_logprobs = meta_info.get("output_token_logprobs", [])
         token_ids = [item[1] for item in output_token_logprobs] if output_token_logprobs else []
         log_probs = [item[0] for item in output_token_logprobs] if output_token_logprobs else []
-        
+
         # Get finish reason
         finish_reason = meta_info.get("finish_reason", {}).get("type")
 
