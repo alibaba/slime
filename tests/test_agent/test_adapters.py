@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -240,6 +241,56 @@ def test_openai_chat_completions_nonstream_records_token_segments():
         assert data["choices"][0]["finish_reason"] == "stop"
         assert sglang.requests[0]["sampling_params"]["max_new_tokens"] == 4
         assert len(samples) == 1 and samples[0].tokens[-1] == 201 and samples[0].loss_mask[-1] == 1
+
+    asyncio.run(run_case())
+
+
+def test_openai_chat_completions_retries_sglang_500():
+    async def run_case():
+        attempts: list[dict] = []
+
+        async def generate(request: web.Request) -> web.Response:
+            attempts.append(await request.json())
+            if len(attempts) < 3:
+                return web.Response(status=500, text="temporary capacity pressure")
+            return web.json_response(
+                {
+                    "meta_info": {
+                        "output_token_logprobs": [[-0.4, 202]],
+                        "finish_reason": {"type": "stop"},
+                    }
+                }
+            )
+
+        upstream_app = web.Application()
+        upstream_app.router.add_post("/generate", generate)
+        async with TestServer(upstream_app) as upstream:
+            tok = FakeTokenizer(outputs={(202,): "recovered"})
+            adapter = openai.OpenAIAdapter(
+                tokenizer=tok,
+                sglang_url=str(upstream.make_url("")).rstrip("/"),
+                sglang_max_retries=2,
+                sglang_retry_base_delay=0,
+            )
+            adapter.open_session("sid-retry")
+            client = TestClient(TestServer(adapter.app))
+            await client.start_server()
+            try:
+                resp = await client.post(
+                    "/v1/chat/completions",
+                    headers={"Authorization": "Bearer sid-retry"},
+                    json={"model": "m", "messages": [{"role": "user", "content": "hi?"}]},
+                )
+                data = await resp.json()
+            finally:
+                await client.close()
+            samples = await _drain(adapter, "sid-retry")
+
+        assert resp.status == 200
+        assert data["choices"][0]["message"] == {"role": "assistant", "content": "recovered"}
+        assert len(attempts) == 3
+        assert len({request["rid"] for request in attempts}) == 3
+        assert len(samples) == 1 and samples[0].tokens[-1] == 202
 
     asyncio.run(run_case())
 

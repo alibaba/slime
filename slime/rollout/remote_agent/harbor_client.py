@@ -350,14 +350,19 @@ async def run_local_trial(
             environment_overrides,
         )
 
-        # Build TrialConfig using Harbor's native API
+        # Build TrialConfig using Harbor's native API. ``timeout`` is an
+        # explicit caller override for the agent phase; without this field Harbor
+        # falls back to task.toml's agent.timeout_sec. Keep timeout_multiplier on
+        # TrialConfig so local mode matches the remote request semantics.
         trial_config = TrialConfig(
             trial_name=run_id,
             task=TaskConfig(path=task_dir),
+            timeout_multiplier=timeout_multiplier,
             agent=TrialAgentConfig(
                 name=agent.name,
                 import_path=agent.import_path,
                 model_name=agent.model_name,
+                override_timeout_sec=timeout,
                 kwargs=agent_kwargs,
                 env=environment_overrides or {},
             ),

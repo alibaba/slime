@@ -147,12 +147,16 @@ class BaseAdapter:
         reasoning_parser=None,
         max_turns_per_sid: int | None = None,
         fork_threshold_tokens: int | None = None,
+        sglang_max_retries: int = 2,
+        sglang_retry_base_delay: float = 1.0,
         debug_callback: Callable[..., None] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.sglang_url = sglang_url.rstrip("/") if isinstance(sglang_url, str) else sglang_url
         self.tool_parser = tool_parser
         self.reasoning_parser = reasoning_parser
+        self.sglang_max_retries = max(0, int(sglang_max_retries))
+        self.sglang_retry_base_delay = max(0.0, float(sglang_retry_base_delay))
         self.store: dict[str, Any] = {}
         self.inflight: dict[str, set[asyncio.Task]] = {}
         self.closed: set[str] = set()
@@ -439,6 +443,15 @@ def _sampling_params(session: Any, body: dict, *, max_token_keys: tuple[str, ...
     return sp
 
 
+class _SGLangUpstreamError(RuntimeError):
+    """HTTP error returned by SGLang before adapter retry handling."""
+
+    def __init__(self, status: int, text: str) -> None:
+        self.status = status
+        self.text = text
+        super().__init__(f"sglang upstream {status}: {text[:400]}")
+
+
 async def call_sglang_generate(
     prompt_ids: list[int],
     session: Any,
@@ -468,47 +481,75 @@ async def call_sglang_generate(
         sp["max_new_tokens"] = min(int(sp.get("max_new_tokens", remaining_context)), remaining_context)
 
     sglang_url = adapter.sglang_url
-    rid = uuid.uuid4().hex
     headers = {"X-SMG-Routing-Key": session_id} if session_id and session_id != "default" else None
     timeout = aiohttp.ClientTimeout(total=None, sock_read=900)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as sess, sess.post(
-            f"{sglang_url}/generate",
-            json={
-                "rid": rid,
-                "input_ids": prompt_ids,
-                "sampling_params": sp,
-                "return_logprob": True,
-            },
-            headers=headers,
-        ) as r:
-            if r.status >= 400:
-                text = await r.text()
+    max_retries = adapter.sglang_max_retries
+
+    for attempt in range(max_retries + 1):
+        rid = uuid.uuid4().hex
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as sess, sess.post(
+                f"{sglang_url}/generate",
+                json={
+                    "rid": rid,
+                    "input_ids": prompt_ids,
+                    "sampling_params": sp,
+                    "return_logprob": True,
+                },
+                headers=headers,
+            ) as r:
+                if r.status >= 400:
+                    text = await r.text()
+                    logger.warning(
+                        "[%s] sid=%s rid=%s sglang upstream %d: %.200s",
+                        adapter.log_prefix,
+                        session_id,
+                        rid,
+                        r.status,
+                        text,
+                    )
+                    raise _SGLangUpstreamError(r.status, text)
+                data = await r.json(content_type=None)
+        except _SGLangUpstreamError as e:
+            if 500 <= e.status < 600 and attempt < max_retries:
+                delay = adapter.sglang_retry_base_delay * (2**attempt)
                 logger.warning(
-                    "[%s] sid=%s rid=%s sglang upstream %d: %.200s",
+                    "[%s] sid=%s retrying sglang request after HTTP %d "
+                    "(attempt %d/%d, delay %.1fs)",
                     adapter.log_prefix,
                     session_id,
-                    rid,
-                    r.status,
-                    text,
+                    e.status,
+                    attempt + 2,
+                    max_retries + 1,
+                    delay,
                 )
-                raise RuntimeError(f"sglang upstream {r.status}: {text[:400]}")
-            data = await r.json(content_type=None)
-        meta = data.get("meta_info") or {}
-        output_token_logprobs = meta.get("output_token_logprobs") or []
-        output_ids = [x[1] for x in output_token_logprobs]
-        output_log_probs = [float(x[0]) for x in output_token_logprobs]
-        finish = (meta.get("finish_reason") or {}).get("type", "stop") or "stop"
-    except (asyncio.CancelledError, aiohttp.ClientError, asyncio.TimeoutError) as e:
-        # free the sglang slot eagerly on client cancel/timeout, else the
-        # orphaned generation keeps occupying KV until its own length cap
-        logger.debug("[%s] sid=%s rid=%s turn aborted: %s", adapter.log_prefix, session_id, rid, type(e).__name__)
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s2:
-                await s2.post(f"{sglang_url}/abort_request", json={"rid": rid})
-        except Exception:
-            pass
-        raise
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                continue
+            raise RuntimeError(str(e)) from e
+        except (asyncio.CancelledError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            # free the sglang slot eagerly on client cancel/timeout, else the
+            # orphaned generation keeps occupying KV until its own length cap
+            logger.debug(
+                "[%s] sid=%s rid=%s turn aborted: %s",
+                adapter.log_prefix,
+                session_id,
+                rid,
+                type(e).__name__,
+            )
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s2:
+                    await s2.post(f"{sglang_url}/abort_request", json={"rid": rid})
+            except Exception:
+                pass
+            raise
+        break
+
+    meta = data.get("meta_info") or {}
+    output_token_logprobs = meta.get("output_token_logprobs") or []
+    output_ids = [x[1] for x in output_token_logprobs]
+    output_log_probs = [float(x[0]) for x in output_token_logprobs]
+    finish = (meta.get("finish_reason") or {}).get("type", "stop") or "stop"
 
     return TurnRecord(
         prompt_ids=list(prompt_ids),
