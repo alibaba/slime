@@ -13,6 +13,7 @@ full stack.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import types
@@ -135,6 +136,51 @@ def test_resolve_falls_back_to_task_toml(tmp_path):
 
 def test_resolve_returns_none_when_no_class(tmp_path):
     assert gen._resolve_sandbox_set_name(_args(), _sample({}), str(tmp_path)) is None
+
+
+def test_run_local_trial_overrides_task_agent_timeout(tmp_path, monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Config:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    class _Trial:
+        @classmethod
+        async def create(cls, config):
+            captured["config"] = config
+            return cls()
+
+        async def run(self):
+            return types.SimpleNamespace(
+                exception_info=None,
+                verifier_result=types.SimpleNamespace(rewards={"reward": 1.0}),
+            )
+
+    for module_name in ("harbor", "harbor.models", "harbor.models.trial", "harbor.trial"):
+        monkeypatch.setitem(sys.modules, module_name, types.ModuleType(module_name))
+    config_module = types.ModuleType("harbor.models.trial.config")
+    for name in ("AgentConfig", "EnvironmentConfig", "TaskConfig", "TrialConfig", "VerifierConfig"):
+        setattr(config_module, name, _Config)
+    trial_module = types.ModuleType("harbor.trial.trial")
+    trial_module.Trial = _Trial
+    monkeypatch.setitem(sys.modules, "harbor.models.trial.config", config_module)
+    monkeypatch.setitem(sys.modules, "harbor.trial.trial", trial_module)
+    monkeypatch.setitem(sys.modules, "shortuuid", types.SimpleNamespace(uuid=lambda: "stubuuid"))
+
+    result = asyncio.run(
+        client.run_local_trial(
+            task_path=str(tmp_path),
+            agent=client.HarborAgentConfig(name="swe-agent"),
+            timeout=3600.0,
+            timeout_multiplier=1.5,
+        )
+    )
+
+    trial_config = captured["config"]
+    assert result.status == "completed"
+    assert trial_config.agent.override_timeout_sec == 3600.0
+    assert trial_config.timeout_multiplier == 1.5
 
 
 if __name__ == "__main__":
