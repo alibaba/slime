@@ -70,11 +70,15 @@ COPY . /root/slime/
 RUN pip install -e . --no-deps
 RUN pip install shortuuid
 
-# Harbor（跑外置 agent；这里用带 ACK sandbox + E2B 支持的分支）。安装会拉入 harbor 的运行时依赖
-# （e2b SDK、litellm、dirhash、dockerfile-parse、tenacity...）。harbor 会带入 openai>2.6.1（sglang 钉 ==2.6.1），
-# 实测运行无碍，不再 re-pin。
-RUN git clone --depth 1 -b feat/ack-sandbox-image-override \
-        https://github.com/alibaba/harbor.git /root/harbor && \
+# Harbor（跑外置 agent）。**钉在不可变 commit 上**保证构建可复现：harbor 的 feat/* 分支合并后会被删除，
+# release 分支又会移动。4ef296bc 是 release-dev-e5e46809（长期存在的 ACK 线）在 2026-09-04 的 head。
+# `git clone --depth 1 -b` 不接受 SHA，所以用 init + fetch 单个 commit。
+# 安装会拉入 harbor 的运行时依赖（e2b SDK、litellm、dirhash、dockerfile-parse、tenacity...）。
+# harbor 会带入 openai>2.6.1（sglang 钉 ==2.6.1），实测运行无碍，不再 re-pin。
+RUN git init /root/harbor && \
+    git -C /root/harbor remote add origin https://github.com/alibaba/harbor.git && \
+    git -C /root/harbor fetch --depth 1 origin 4ef296bc8004fe6d0a1ea06dbd90253d681663df && \
+    git -C /root/harbor checkout FETCH_HEAD && \
     pip install -e /root/harbor && \
     pip install kubernetes_asyncio
 

@@ -21,16 +21,22 @@ RUN pip install -e . --no-deps
 RUN pip install shortuuid
 
 # --- Harbor (ACK sandbox over E2B) for slime remote-agent RL ---
-# Use the feat/ack-sandbox-image-override branch: it adds E2BEnvironment kwargs
-# `sandbox_set_name` + `override_claim_image`, skips the (ACK-manager-unsupported)
-# AsyncTemplate.build, and applies the per-claim image override via the gateway key
-# `e2b.agents.kruise.io/image`. Verified against ack-sandbox-manager v0.6.7 (commit 63e77d6).
+# Pinned to an immutable commit so image builds are reproducible: harbor's feat/* branches are
+# deleted on merge and its release branches move. 4ef296bc is the head of release-dev-e5e46809
+# (the long-lived ACK line) as of 2026-09-04; bump it deliberately.
+# That commit keeps the E2BEnvironment kwargs slime passes - `sandbox_set_name` +
+# `override_claim_image` (per-claim image override via the gateway key
+# `e2b.agents.kruise.io/image`, skipping the ACK-manager-unsupported AsyncTemplate.build) - and
+# carries the rollout-server, persistent exec, SSH exec and shared-log-volume work.
+# `git clone --depth 1 -b` cannot take a SHA, hence init + fetch of the single commit.
 # The full install pulls harbor's runtime deps (e2b SDK, litellm, dirhash, dockerfile-parse,
 # tenacity, ...) that the E2B environment + Trial + swe-agent need.
 # NOTE: harbor pulls openai>2.6.1 (sglang pins ==2.6.1); this was verified harmless at runtime
 # (SGLang engines load and serve fine), so we do not re-pin.
-RUN git clone --depth 1 -b feat/ack-sandbox-image-override \
-        https://github.com/alibaba/harbor.git /root/harbor && \
+RUN git init /root/harbor && \
+    git -C /root/harbor remote add origin https://github.com/alibaba/harbor.git && \
+    git -C /root/harbor fetch --depth 1 origin 4ef296bc8004fe6d0a1ea06dbd90253d681663df && \
+    git -C /root/harbor checkout FETCH_HEAD && \
     pip install -e /root/harbor && \
     pip install kubernetes_asyncio
 
