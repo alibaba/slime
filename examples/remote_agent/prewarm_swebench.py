@@ -3,9 +3,9 @@
 
 Each selected task has a different image, so it gets its own one-replica
 SandboxSet. Images are pulled four at a time to avoid overwhelming the ACR public
-endpoint. The main-container startup installs only OS tools; SWE-agent itself was
-built once into the slime workspace image and an init container copies that
-prepared tree into a pod-local emptyDir shared with the task container.
+endpoint. The main-container startup installs only OS tools; SWE-agent itself is
+prepared once in the workspace image, then an init container copies it to a
+pod-local emptyDir mounted read-only in the task container.
 
 No SSH transport is involved. The training launcher reaches these sandboxes via
 Harbor's persistent pods/exec connection.
@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
-import socket
+import re
 import tomllib
 from pathlib import Path
 
@@ -29,6 +30,15 @@ def quantity(task: dict, key: str, default: str | int) -> str:
     return value.replace("G", "Gi") if key in ("memory", "storage") else value
 
 
+def kubernetes_name(value: str, max_length: int = 58) -> str:
+    """Match Harbor ACKEnvironment's SandboxSet naming exactly."""
+    sanitized = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-") or "harbor"
+    if len(sanitized) <= max_length:
+        return sanitized
+    digest = hashlib.sha256(value.encode()).hexdigest()[:8]
+    return f"{sanitized[: max_length - len(digest) - 1].rstrip('-')}-{digest}"
+
+
 class Prewarmer:
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -37,7 +47,7 @@ class Prewarmer:
     def body(self, task_name: str) -> dict:
         task = tomllib.loads((self.args.dataset / task_name / "task.toml").read_text())
         env_name = task_name.replace("__", "-").replace("/", "-")
-        name = f"{self.args.prefix}-{env_name}"
+        name = kubernetes_name(f"{self.args.prefix}-{env_name}")
         resources = {"requests": {
             "cpu": quantity(task, "cpus", 1),
             "memory": quantity(task, "memory", "4G"),

@@ -39,10 +39,9 @@ MAX_RESP="${MAX_RESP:-2048}"
 MAX_CTX="${MAX_CTX:-40960}"
 
 # Use Harbor's SWE-agent integration. The workspace image prepares it once at
-# build time; an init container copies that tree into a pod-local emptyDir shared
-# with the task container. The custom subclass only activates compatibility
-# symlinks—it never clones or pip-installs during a trial, there is no first-install
-# race, and Python imports do not hit remote storage.
+# build time; an init container in each sandbox Pod copies that tree to a
+# pod-local emptyDir shared with the task container. The custom subclass only
+# activates compatibility symlinks—it never clones or pip-installs in a trial.
 HARBOR_AGENT_NAME="${HARBOR_AGENT_NAME:-}"
 HARBOR_AGENT_IMPORT_PATH="${HARBOR_AGENT_IMPORT_PATH:-examples.remote_agent.shared_swe_agent:SharedSweAgent}"
 HARBOR_AGENT_KWARGS="${HARBOR_AGENT_KWARGS:-}"
@@ -62,8 +61,7 @@ KUBECONFIG_IN_POD="${KUBECONFIG_IN_POD:-}"
 SANDBOX_LABELS="${SANDBOX_LABELS:-}"
 [ -n "$SANDBOX_LABELS" ] || SANDBOX_LABELS='{"alibabacloud.com/acs": "true"}'
 # The init container must use the exact running workspace image because that is
-# where /opt/sweagent-shared was baked. Resolve it from this head pod unless the
-# caller supplies an explicit image.
+# where /opt/sweagent-shared was baked.
 WORKSPACE_IMAGE="${WORKSPACE_IMAGE:-}"
 if [ -z "$WORKSPACE_IMAGE" ]; then
   WORKSPACE_IMAGE=$(python - <<'PY'
