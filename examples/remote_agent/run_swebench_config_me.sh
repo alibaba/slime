@@ -38,22 +38,20 @@ GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
 MAX_RESP="${MAX_RESP:-2048}"
 MAX_CTX="${MAX_CTX:-40960}"
 
-# terminus-2 is already integrated and records exact adapter turns. The installed
-# swe-agent adapter would clone/install SWE-agent separately into all 64 sandboxes
-# before doing useful work, which adds a large network/setup confound to this
-# routing benchmark.
-HARBOR_AGENT_NAME="${HARBOR_AGENT_NAME:-terminus-2}"
+# Use Harbor's SWE-agent integration. The workspace image prepares it once at
+# build time; an init container copies that tree into a pod-local emptyDir shared
+# with the task container. The custom subclass only activates compatibility
+# symlinks—it never clones or pip-installs during a trial, there is no first-install
+# race, and Python imports do not hit remote storage.
+HARBOR_AGENT_NAME="${HARBOR_AGENT_NAME:-}"
+HARBOR_AGENT_IMPORT_PATH="${HARBOR_AGENT_IMPORT_PATH:-examples.remote_agent.shared_swe_agent:SharedSweAgent}"
 HARBOR_AGENT_KWARGS="${HARBOR_AGENT_KWARGS:-}"
 [ -n "$HARBOR_AGENT_KWARGS" ] || HARBOR_AGENT_KWARGS='{
-  "model_info": {
-    "max_input_tokens": 32768,
-    "max_output_tokens": 4096,
-    "input_cost_per_token": 0,
-    "output_cost_per_token": 0
-  },
-  "proactive_summarization_threshold": 8000,
-  "llm_kwargs": {"api_key": "sk-slime-adapter"},
-  "max_turns": 40
+  "shared_install_dir": "/opt/sweagent-shared",
+  "version": "v1.1.0",
+  "per_instance_cost_limit": 0,
+  "total_cost_limit": 0,
+  "max_input_tokens": 32768
 }'
 
 # ACK / ACS sandbox backend.
@@ -63,6 +61,20 @@ SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-rayclustertest}"
 KUBECONFIG_IN_POD="${KUBECONFIG_IN_POD:-}"
 SANDBOX_LABELS="${SANDBOX_LABELS:-}"
 [ -n "$SANDBOX_LABELS" ] || SANDBOX_LABELS='{"alibabacloud.com/acs": "true"}'
+# The init container must use the exact running workspace image because that is
+# where /opt/sweagent-shared was baked. Resolve it from this head pod unless the
+# caller supplies an explicit image.
+WORKSPACE_IMAGE="${WORKSPACE_IMAGE:-}"
+if [ -z "$WORKSPACE_IMAGE" ]; then
+  WORKSPACE_IMAGE=$(python - <<'PY'
+import socket
+from kubernetes import client, config
+config.load_incluster_config()
+pod = client.CoreV1Api().read_namespaced_pod(socket.gethostname(), "default")
+print(pod.spec.containers[0].image)
+PY
+)
+fi
 
 # One SandboxSet exists per task image. A warm replica in every set doubles the
 # footprint for a diverse batch; zero plus createOnNoStock creates exactly one
@@ -82,9 +94,30 @@ HARBOR_ENV_KWARGS="${HARBOR_ENV_KWARGS:-}"
   "sandbox_labels": $SANDBOX_LABELS,
   "sandboxset_prefix": "$SANDBOXSET_PREFIX",
   "sandboxset_replicas": $SANDBOXSET_REPLICAS,
+  "sandbox_runtimes": [],
   "claim_timeout": 1800,
   "sandbox_ready_timeout_sec": 900,
   "build_timeout_sec": 1800,
+  "pod_overrides": {
+    "spec": {
+      "volumes": [
+        {"name": "sweagent-shared", "emptyDir": {}}
+      ],
+      "initContainers": [
+        {
+          "name": "copy-sweagent",
+          "image": "$WORKSPACE_IMAGE",
+          "command": ["/bin/sh", "-c", "cp -a /opt/sweagent-shared/. /shared/"],
+          "volumeMounts": [{"name": "sweagent-shared", "mountPath": "/shared"}]
+        }
+      ],
+      "containers": [
+        {"volumeMounts": [
+          {"name": "sweagent-shared", "mountPath": "/opt/sweagent-shared", "readOnly": true}
+        ]}
+      ]
+    }
+  },
   "exec_api_pool_size": 256,
   "use_persistent_exec_connection": true,
   "persistent_exec_connect_max_attempts": 10,
@@ -135,7 +168,7 @@ ARGS=(
   --rollout-function-path slime.rollout.sglang_rollout.generate_rollout
   --harbor-use-local-trial --harbor-env-import-path harbor.environments.ack:ACKEnvironment
   --harbor-adapter-public-host "$HEAD_IP" --harbor-adapter-port "${HARBOR_ADAPTER_PORT:-18001}"
-  --harbor-agent-name "$HARBOR_AGENT_NAME" --harbor-model-name "$MODEL_NAME"
+  --harbor-model-name "$MODEL_NAME"
   --harbor-task-path-template "$TASK_PATH_TEMPLATE"
   --harbor-env-kwargs "$HARBOR_ENV_KWARGS"
   --harbor-agent-kwargs "$HARBOR_AGENT_KWARGS"
@@ -159,6 +192,13 @@ ARGS=(
 [ "$RESUME" = 1 ] && ARGS+=( --load "$SAVE_DIR" )
 [ "$APPLY_CHAT_TEMPLATE" = 1 ] && ARGS+=( --apply-chat-template )
 [ -n "$ROUTER_POLICY" ] && ARGS+=( --router-policy "$ROUTER_POLICY" )
+if [ -n "$HARBOR_AGENT_IMPORT_PATH" ]; then
+  ARGS+=( --harbor-agent-import-path "$HARBOR_AGENT_IMPORT_PATH" )
+elif [ -n "$HARBOR_AGENT_NAME" ]; then
+  ARGS+=( --harbor-agent-name "$HARBOR_AGENT_NAME" )
+else
+  echo "ERROR: set HARBOR_AGENT_IMPORT_PATH or HARBOR_AGENT_NAME"; exit 1
+fi
 
 if [ "$DEPLOY" = colocate ]; then
   ARGS+=( --colocate )
@@ -170,6 +210,6 @@ else
 fi
 
 echo "[run] SWE-bench Verified DEPLOY=$DEPLOY GPUS=$GPUS actor_TP=$TP DP=$_DP rollout_replicas=$((GPUS / ROLLOUT_GPUS_PER_ENGINE))"
-echo "[run] concurrency=$((ROLLOUT_BATCH_SIZE * N_SAMPLES)) distinct_prompts=$ROLLOUT_BATCH_SIZE steps=$NUM_ROLLOUT router=${ROUTER_POLICY:-cache_aware} transport=persistent_exec"
+echo "[run] concurrency=$((ROLLOUT_BATCH_SIZE * N_SAMPLES)) distinct_prompts=$ROLLOUT_BATCH_SIZE steps=$NUM_ROLLOUT router=${ROUTER_POLICY:-cache_aware} transport=persistent_exec agent=${HARBOR_AGENT_IMPORT_PATH:-$HARBOR_AGENT_NAME}"
 echo "[run] data=$PROMPT_DATA tasks=$TASK_PATH_TEMPLATE sandboxset_prefix=$SANDBOXSET_PREFIX"
 exec python train_remote_agent.py "${ARGS[@]}" "$@"
