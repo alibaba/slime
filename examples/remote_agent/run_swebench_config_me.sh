@@ -48,6 +48,9 @@ HARBOR_AGENT_KWARGS="${HARBOR_AGENT_KWARGS:-}"
 [ -n "$HARBOR_AGENT_KWARGS" ] || HARBOR_AGENT_KWARGS='{
   "shared_install_dir": "/opt/sweagent-shared",
   "version": "v1.1.0",
+  "extra_env": {
+    "SWEAGENT_CONFIG": "/opt/sweagent-shared/repo/config/sweagent_0_7/07_thought_action.yaml"
+  },
   "per_instance_cost_limit": 0,
   "total_cost_limit": 0,
   "max_input_tokens": 32768
