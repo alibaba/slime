@@ -125,10 +125,12 @@ SANDBOX_LABELS="${SANDBOX_LABELS:-}"
 SSH_KEY_SCOPE="${SSH_KEY_SCOPE:-slime-tb-$(date +%Y%m%d-%H%M%S)}"
 SANDBOXSET_PREFIX="${SANDBOXSET_PREFIX:-$SSH_KEY_SCOPE}"
 
-# Warm-pool size, deliberately independent of the concurrency: every claim arrives
-# before a large pool could be ready, so `createOnNoStock` serves them anyway and a
-# pool sized to the concurrency just doubles the ACS footprint.
-SANDBOXSET_REPLICAS="${SANDBOXSET_REPLICAS:-8}"
+# Warm-pool size, deliberately independent of concurrency. This run has 64
+# different task images, hence 64 different SandboxSets: even one warm replica
+# per set would allocate 64 idle pods, and sizing each pool to the concurrency
+# creates 512 warm pods on top of 64 claims. Zero is valid; every claim uses
+# createOnNoStock to cold-create exactly its one sandbox.
+SANDBOXSET_REPLICAS="${SANDBOXSET_REPLICAS:-0}"
 
 # harbor starts sshd in the SandboxSet itself (`ssh_server_command`), so the claimed
 # pod no longer needs a pod_overrides command. It is wrapped in a shell that runs
