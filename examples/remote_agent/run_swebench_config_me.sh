@@ -48,12 +48,15 @@ HARBOR_AGENT_KWARGS="${HARBOR_AGENT_KWARGS:-}"
 [ -n "$HARBOR_AGENT_KWARGS" ] || HARBOR_AGENT_KWARGS='{
   "shared_install_dir": "/opt/sweagent-shared",
   "version": "v1.1.0",
-  "extra_env": {
-    "SWEAGENT_CONFIG": "/opt/sweagent-shared/repo/config/sweagent_0_7/07_thought_action.yaml"
-  },
   "per_instance_cost_limit": 0,
   "total_cost_limit": 0,
   "max_input_tokens": 32768
+}'
+# AgentFactory owns `extra_env`; pass SWEAGENT_CONFIG through AgentConfig.env
+# rather than duplicating the constructor kwarg inside HARBOR_AGENT_KWARGS.
+HARBOR_ENV_OVERRIDES="${HARBOR_ENV_OVERRIDES:-}"
+[ -n "$HARBOR_ENV_OVERRIDES" ] || HARBOR_ENV_OVERRIDES='{
+  "SWEAGENT_CONFIG": "/opt/sweagent-shared/repo/config/sweagent_0_7/07_thought_action.yaml"
 }'
 
 # ACK / ACS sandbox backend.
@@ -166,6 +169,7 @@ ARGS=(
   --harbor-model-name "$MODEL_NAME"
   --harbor-task-path-template "$TASK_PATH_TEMPLATE"
   --harbor-env-kwargs "$HARBOR_ENV_KWARGS"
+  --harbor-env-overrides "$HARBOR_ENV_OVERRIDES"
   --harbor-agent-kwargs "$HARBOR_AGENT_KWARGS"
   --harbor-timeout "$HARBOR_TIMEOUT"
   --prompt-data "$PROMPT_DATA" --input-key prompt --rollout-global-dataset
