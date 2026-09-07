@@ -50,7 +50,11 @@ def retarget(task_toml: Path, dst_host: str, agent: float | None, verifier: floa
     for table, value in (("agent", agent), ("verifier", verifier)):
         if value is None:
             continue
-        new_text, n = re.subn(rf"(\[{table}\]\s*\ntimeout_sec\s*=\s*)[0-9.]+", rf"\g<1>{value:.1f}", text)
+        # Allow comments and blank lines between the table header and key, but
+        # never cross into the next TOML table. SWE-bench task.toml files put an
+        # explanatory comment there, while TerminalBench generally does not.
+        pattern = rf"(\[{table}\](?:(?!^\s*\[)[\s\S])*?^timeout_sec\s*=\s*)[0-9.]+"
+        new_text, n = re.subn(pattern, rf"\g<1>{value:.1f}", text, flags=re.MULTILINE)
         if n and new_text != text:
             changes.append(f"{table}_timeout")
             text = new_text
