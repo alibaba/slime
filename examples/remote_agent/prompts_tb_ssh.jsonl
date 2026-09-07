@@ -1,0 +1,1 @@
+{"prompt": [{"role": "user", "content": "Complete the task described in the instructions available in your environment. Read the task instruction, then use the terminal to accomplish it so the tests pass."}], "task_name": "adaptive-rejection-sampler", "metadata": {"instance_id": "adaptive-rejection-sampler"}}

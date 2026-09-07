@@ -20,29 +20,34 @@ COPY . /root/slime/
 RUN pip install -e . --no-deps
 RUN pip install shortuuid
 
-# --- Harbor (ACK sandbox over E2B) for slime remote-agent RL ---
-# Use the feat/ack-sandbox-image-override branch: it adds E2BEnvironment kwargs
-# `sandbox_set_name` + `override_claim_image`, skips the (ACK-manager-unsupported)
-# AsyncTemplate.build, and applies the per-claim image override via the gateway key
-# `e2b.agents.kruise.io/image`. Verified against ack-sandbox-manager v0.6.7 (commit 63e77d6).
-# The full install pulls harbor's runtime deps (e2b SDK, litellm, dirhash, dockerfile-parse,
-# tenacity, ...) that the E2B environment + Trial + swe-agent need.
-# NOTE: harbor pulls openai>2.6.1 (sglang pins ==2.6.1); this was verified harmless at runtime
+# --- Harbor (ACK sandbox backend) for slime remote-agent RL ---
+# release-dev-e5e46809 carries the ACKEnvironment work this example depends on:
+# per-claim image override (one generic SandboxSet serves every task image), the
+# SSH exec transport (`use_ssh_exec`, which keeps command traffic off the API
+# server's pods/exec at high Trial concurrency) including `ssh_server_command` so
+# harbor starts sshd in the SandboxSet itself, and SandboxClaim compatibility when
+# `sandboxset_prefix` is unique per `ssh_key_scope`.
+# Pinned to a branch rather than a commit because the earlier feature branches
+# (feat/ack-sandbox-image-override, feat/ack-persistent-exec) were deleted upstream
+# once merged, which silently breaks this build step.
+# The `[ack-ssh]` extra adds asyncssh, which the SSH transport imports lazily and
+# refuses to run without. `kubernetes` (sync client) is needed alongside
+# kubernetes_asyncio: ACKEnvironment uses the sync DynamicClient for the CRDs.
+# NOTE: harbor pulls openai>2.6.1 (sglang pins ==2.6.1); verified harmless at runtime
 # (SGLang engines load and serve fine), so we do not re-pin.
-RUN git clone --depth 1 -b feat/ack-sandbox-image-override \
+RUN git clone --depth 1 -b release-dev-e5e46809 \
         https://github.com/alibaba/harbor.git /root/harbor && \
-    pip install -e /root/harbor && \
-    pip install kubernetes_asyncio
+    pip install -e '/root/harbor[ack-ssh]' && \
+    pip install kubernetes_asyncio kubernetes
 
-# Runtime config to talk to the in-cluster ACK sandbox stack over E2B (override at run time):
-#   E2B_API_KEY=<e2b admin key>
-#   E2B_API_URL=http://sandbox-manager.sandbox-system:8080      # control plane
-#   E2B_SANDBOX_URL=http://sandbox-gateway.sandbox-system:7788  # data plane (router)
-#   E2B_VALIDATE_API_KEY=false
-# The SandboxSet pool must set spec.runtimes:[{name: agent-runtime}] (injects envd) and,
-# for private task images, imagePullSecrets. Per-claim image override is currently broken on
-# the ACK controller (in-place update leaves the sandbox state=dead/InplaceUpdating), so bake
-# the task image into the SandboxSet and use override_claim_image=false (one pool per image).
+# mbridge is required to convert/bridge qwen3_5 weights (tools/convert_hf_to_torch_dist.py
+# imports slime_plugins.mbridge). Pinned to the commit the examples were validated with.
+RUN pip install "git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c" --no-deps
+
+# Runtime config for the ACK sandbox backend is passed per run via --harbor-env-kwargs;
+# see examples/remote_agent/run_terminalbench_config_me.sh for a working set. The two SSH
+# Secrets (harbor-ssh-private-keys / harbor-ssh-authorized-keys) must be pre-created in the
+# sandbox namespace — harbor deliberately holds no `secrets create` permission.
 
 # 重新安装 int4_qat 内核（如果存在）
 RUN if [ -d "/root/slime/slime/backends/megatron_utils/kernels/int4_qat" ]; then \
