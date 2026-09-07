@@ -30,15 +30,19 @@ RUN pip install shortuuid
 # Pinned to a branch rather than a commit because the earlier feature branches
 # (feat/ack-sandbox-image-override, feat/ack-persistent-exec) were deleted upstream
 # once merged, which silently breaks this build step.
-# The `[ack-ssh]` extra adds asyncssh, which the SSH transport imports lazily and
-# refuses to run without. `kubernetes` (sync client) is needed alongside
-# kubernetes_asyncio: ACKEnvironment uses the sync DynamicClient for the CRDs.
+# asyncssh is installed on its own rather than through harbor's `[ack-ssh]` extra:
+# that extra's dependency chain resolves a newer `cryptography`, and pip cannot
+# uninstall the distro-managed 41.0.7 in this base image (installed by apt, so it
+# has no RECORD file) — the build fails with `uninstall-no-record-file`. asyncssh
+# is satisfied by the cryptography already present. `kubernetes` (sync client) is
+# needed alongside kubernetes_asyncio: ACKEnvironment uses the sync DynamicClient
+# for the CRDs.
 # NOTE: harbor pulls openai>2.6.1 (sglang pins ==2.6.1); verified harmless at runtime
 # (SGLang engines load and serve fine), so we do not re-pin.
 RUN git clone --depth 1 -b release-dev-e5e46809 \
         https://github.com/alibaba/harbor.git /root/harbor && \
-    pip install -e '/root/harbor[ack-ssh]' && \
-    pip install kubernetes_asyncio kubernetes
+    pip install -e /root/harbor && \
+    pip install asyncssh kubernetes_asyncio kubernetes
 
 # mbridge is required to convert/bridge qwen3_5 weights (tools/convert_hf_to_torch_dist.py
 # imports slime_plugins.mbridge). Pinned to the commit the examples were validated with.
