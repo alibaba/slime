@@ -49,6 +49,7 @@ def validated(root: Path, version: str) -> bool:
         root / "venv/bin/pip",
         root / "repo/config/default.yaml",
         root / "configs/default.yaml",
+        root / "configs/qwen_thought_action.yaml",
     )
     return manifest.get("version") == version and all(path.exists() for path in required)
 
@@ -113,6 +114,16 @@ def main() -> int:
         backticks = mount / "repo/config/default_backticks.yaml"
         if backticks.exists():
             shutil.copy2(backticks, configs / "default_backticks.yaml")
+            # Qwen uses the thought_action parser, but the stock backticks config
+            # installs tree-sitter-languages into every task's conda environment
+            # for edit_anthropic. Remove only that optional editor bundle: bash
+            # remains enabled, registry provides _read_env/_write_env, and the
+            # review-on-submit bundle provides submit. This prevents 64 repeated
+            # PyPI installs while preserving a complete solve/edit/test loop.
+            qwen_config = backticks.read_text().replace(
+                "      - path: tools/edit_anthropic\n", ""
+            )
+            (configs / "qwen_thought_action.yaml").write_text(qwen_config)
         (Path(site_packages) / "trajectories").mkdir(exist_ok=True)
 
         version_output = run(

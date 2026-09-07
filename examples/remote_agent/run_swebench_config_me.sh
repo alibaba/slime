@@ -56,7 +56,7 @@ HARBOR_AGENT_KWARGS="${HARBOR_AGENT_KWARGS:-}"
 # rather than duplicating the constructor kwarg inside HARBOR_AGENT_KWARGS.
 HARBOR_ENV_OVERRIDES="${HARBOR_ENV_OVERRIDES:-}"
 [ -n "$HARBOR_ENV_OVERRIDES" ] || HARBOR_ENV_OVERRIDES='{
-  "SWEAGENT_CONFIG": "/opt/sweagent-shared/configs/default_backticks.yaml"
+  "SWEAGENT_CONFIG": "/opt/sweagent-shared/configs/qwen_thought_action.yaml"
 }'
 
 # ACK / ACS sandbox backend.
