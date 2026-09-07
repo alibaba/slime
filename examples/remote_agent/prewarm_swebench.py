@@ -205,7 +205,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--workspace-image",
-        default="yueming-acr-me-registry.me-east-1.cr.aliyuncs.com/agents/sweagent-init:v1.1.0",
+        default="yueming-acr-me-registry.me-east-1.cr.aliyuncs.com/agents/sweagent-init:qwen-v1.1.0",
         help="compact in-region image carrying /opt/sweagent-shared",
     )
     ap.add_argument("--image-pull-secret", default="acr-pro-registry-me")

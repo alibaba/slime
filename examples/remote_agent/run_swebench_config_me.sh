@@ -67,9 +67,9 @@ KUBECONFIG_IN_POD="${KUBECONFIG_IN_POD:-}"
 SANDBOX_LABELS="${SANDBOX_LABELS:-}"
 [ -n "$SANDBOX_LABELS" ] || SANDBOX_LABELS='{"alibabacloud.com/acs": "true"}'
 # Compact in-region distribution image containing only the prepared SWE-agent
-# tree (335 MB, source/target manifest digest 9d73a5...). It runs only as a
-# sandbox init container, copies into emptyDir, then exits.
-SWEAGENT_INIT_IMAGE="${SWEAGENT_INIT_IMAGE:-yueming-acr-me-registry.me-east-1.cr.aliyuncs.com/agents/sweagent-init:v1.1.0}"
+# tree and the Qwen thought-action config. It runs only as a sandbox init
+# container, copies into emptyDir, then exits.
+SWEAGENT_INIT_IMAGE="${SWEAGENT_INIT_IMAGE:-yueming-acr-me-registry.me-east-1.cr.aliyuncs.com/agents/sweagent-init:qwen-v1.1.0}"
 
 # One SandboxSet exists per task image. A warm replica in every set doubles the
 # footprint for a diverse batch; zero plus createOnNoStock creates exactly one
