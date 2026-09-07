@@ -60,19 +60,10 @@ SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-rayclustertest}"
 KUBECONFIG_IN_POD="${KUBECONFIG_IN_POD:-}"
 SANDBOX_LABELS="${SANDBOX_LABELS:-}"
 [ -n "$SANDBOX_LABELS" ] || SANDBOX_LABELS='{"alibabacloud.com/acs": "true"}'
-# The init container must use the exact running workspace image because that is
-# where /opt/sweagent-shared was baked.
-WORKSPACE_IMAGE="${WORKSPACE_IMAGE:-}"
-if [ -z "$WORKSPACE_IMAGE" ]; then
-  WORKSPACE_IMAGE=$(python - <<'PY'
-import socket
-from kubernetes import client, config
-config.load_incluster_config()
-pod = client.CoreV1Api().read_namespaced_pod(socket.gethostname(), "default")
-print(pod.spec.containers[0].image)
-PY
-)
-fi
+# Compact in-region distribution image containing only the prepared SWE-agent
+# tree (335 MB, source/target manifest digest 9d73a5...). It runs only as a
+# sandbox init container, copies into emptyDir, then exits.
+SWEAGENT_INIT_IMAGE="${SWEAGENT_INIT_IMAGE:-yueming-acr-me-registry.me-east-1.cr.aliyuncs.com/agents/sweagent-init:v1.1.0}"
 
 # One SandboxSet exists per task image. A warm replica in every set doubles the
 # footprint for a diverse batch; zero plus createOnNoStock creates exactly one
@@ -98,13 +89,16 @@ HARBOR_ENV_KWARGS="${HARBOR_ENV_KWARGS:-}"
   "build_timeout_sec": 1800,
   "pod_overrides": {
     "spec": {
+      "imagePullSecrets": [
+        {"name": "$IMAGE_PULL_SECRET"}
+      ],
       "volumes": [
         {"name": "sweagent-shared", "emptyDir": {}}
       ],
       "initContainers": [
         {
           "name": "copy-sweagent",
-          "image": "$WORKSPACE_IMAGE",
+          "image": "$SWEAGENT_INIT_IMAGE",
           "command": ["/bin/sh", "-c", "cp -a /opt/sweagent-shared/. /shared/"],
           "volumeMounts": [{"name": "sweagent-shared", "mountPath": "/shared"}]
         }

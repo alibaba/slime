@@ -18,7 +18,6 @@ import asyncio
 import hashlib
 import json
 import re
-import socket
 import tomllib
 from pathlib import Path
 
@@ -192,16 +191,17 @@ def main() -> None:
         "--prompts", type=Path,
         default=Path("/root/slime/examples/remote_agent/prompts_swe_64.jsonl"),
     )
-    ap.add_argument("--workspace-image")
+    ap.add_argument(
+        "--workspace-image",
+        default="yueming-acr-me-registry.me-east-1.cr.aliyuncs.com/agents/sweagent-init:v1.1.0",
+        help="compact in-region image carrying /opt/sweagent-shared",
+    )
     ap.add_argument("--image-pull-secret", default="acr-pro-registry-me")
     ap.add_argument("--max-in-flight", type=int, default=4)
     ap.add_argument("--ready-timeout", type=int, default=2400)
     args = ap.parse_args()
 
     config.load_incluster_config()
-    if not args.workspace_image:
-        pod = client.CoreV1Api().read_namespaced_pod(socket.gethostname(), args.namespace)
-        args.workspace_image = pod.spec.containers[0].image
     if not args.dataset.is_dir():
         raise SystemExit(f"dataset root does not exist: {args.dataset}")
     asyncio.run(Prewarmer(args).run())
