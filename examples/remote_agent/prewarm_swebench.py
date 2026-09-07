@@ -149,15 +149,27 @@ class Prewarmer:
                 print(f"  {name}: available={state[0]} replicas={state[1]}", flush=True)
                 last = state
             if state[0] >= 1:
-                if not old_sandboxes:
-                    return name
                 current = await self.call(
                     "list", "sandboxes",
                     label_selector=f"agents.kruise.io/sandbox-pool={name}",
                 )
-                current_names = {item["metadata"]["name"] for item in current.get("items", [])}
-                if current_names - old_sandboxes:
-                    return name
+                candidates = [
+                    item for item in current.get("items", [])
+                    if item["metadata"]["name"] not in old_sandboxes
+                ]
+                # SandboxSet.availableReplicas can briefly describe the old pod
+                # after a template patch. Require the replacement Sandbox itself
+                # to report phase=Running and Ready=True, which also proves the
+                # init-container copy and OS-tool install completed.
+                for item in candidates:
+                    status = item.get("status") or {}
+                    ready = any(
+                        condition.get("type") == "Ready"
+                        and condition.get("status") == "True"
+                        for condition in status.get("conditions", [])
+                    )
+                    if status.get("phase") == "Running" and ready:
+                        return name
             await asyncio.sleep(15)
         raise TimeoutError(f"{name} did not become available; last={last}")
 
