@@ -50,17 +50,6 @@ RUN git clone --depth 1 -b release-dev-e5e46809 \
 # imports slime_plugins.mbridge). Pinned to the commit the examples were validated with.
 RUN pip install "git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c" --no-deps
 
-# Prepare SWE-agent once in the workspace image. The sandbox Pod uses this image
-# as an init container and copies the tree to a pod-local emptyDir shared with the
-# task container. This is not colocating agent and slime: the init container runs
-# in the sandbox Pod and exits before the task container starts. A direct OSS/PVC
-# mount is not viable on ACS in this cluster: its CSI injection adds hostPath
-# /var/run/csi, which ACS rejects as an unsupported HostPath volume.
-RUN python examples/remote_agent/prepare_shared_swe_agent.py \
-        --target /opt/sweagent-shared --mount-path /opt/sweagent-shared && \
-    /opt/sweagent-shared/venv/bin/python -c "import sweagent" && \
-    python -c "from examples.remote_agent.shared_swe_agent import SharedSweAgent"
-
 # Runtime config for the ACK sandbox backend is passed per run via --harbor-env-kwargs;
 # see examples/remote_agent/run_terminalbench_config_me.sh for a working set. The two SSH
 # Secrets (harbor-ssh-private-keys / harbor-ssh-authorized-keys) must be pre-created in the
