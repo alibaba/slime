@@ -1534,6 +1534,16 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default="{}",
                 help="JSON-encoded dict of kwargs for the environment constructor.",
             )
+            parser.add_argument(
+                "--harbor-env-retain",
+                action=argparse.BooleanOptionalAction,
+                default=False,
+                help=(
+                    "Retain the local Harbor environment after trial completion "
+                    "(sets TrialConfig.environment.delete=False). Requires "
+                    "--harbor-use-local-trial."
+                ),
+            )
 
             # Task configuration
             parser.add_argument(

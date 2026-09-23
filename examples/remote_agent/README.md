@@ -382,6 +382,7 @@ flask trial 随后在这个被覆盖的 flask 环境里跑通（`status=complete
 | `--harbor-env-overrides` | `{}` | 传给 agent 的环境变量 JSON dict |
 | `--harbor-env-import-path` | `harbor.environments.local_docker:LocalDockerEnvironment` | 环境类 import path |
 | `--harbor-env-kwargs` | `{}` | 环境 kwargs 的 JSON dict |
+| `--harbor-env-retain` | `False` | local trial 结束后保留 Harbor 环境（设置 `TrialConfig.environment.delete=false`；需 `--harbor-use-local-trial`）|
 | `--harbor-task-path-template` | `/home/slime/dataset-tasks/{instance_id}` | 任务目录模板 |
 | `--harbor-adapter-bind-host` | `0.0.0.0` | 进程内 adapter 的绑定 host |
 | `--harbor-adapter-port` | `18001` | 固定 adapter 端口（避开 router 的 3000–4000；0 = 自动）|

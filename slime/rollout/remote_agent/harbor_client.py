@@ -275,6 +275,7 @@ async def run_local_trial(
     timeout: float = 1800.0,
     timeout_multiplier: float = 1.0,
     environment_import_path: str = "harbor.environments.local_docker:LocalDockerEnvironment",
+    environment_delete: bool = True,
     trial_name: str | None = None,
 ) -> HarborRunResult:
     """Run a Harbor Trial directly in the current Python process.
@@ -293,6 +294,9 @@ async def run_local_trial(
         timeout_multiplier: Multiplier for timeout values.
         environment_import_path: Import path for the environment class
             (e.g., "harbor.environments.ack:ACKEnvironment").
+        environment_delete: Whether Harbor should delete the environment after the
+            trial. Pass False to retain ACK Pods/SandboxClaims for debugging or
+            later attachment.
         trial_name: Human-readable trial name. Defaults to the task directory name
             plus a unique suffix.
 
@@ -364,6 +368,7 @@ async def run_local_trial(
                 import_path=environment_import_path,
                 env=environment_overrides or {},
                 kwargs=environment_kwargs or {},
+                delete=environment_delete,
             ),
             verifier=TrialVerifierConfig(
                 disable=verifier.disable,
