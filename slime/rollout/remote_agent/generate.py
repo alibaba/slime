@@ -161,6 +161,12 @@ async def _generate_with_harbor_async(
 ) -> list[Sample]:
     """Async core implementation."""
     use_local = getattr(args, "harbor_use_local_trial", False)
+    retain_environment = getattr(args, "harbor_env_retain", False)
+    if retain_environment and not use_local:
+        raise ValueError(
+            "--harbor-env-retain requires --harbor-use-local-trial; the remote "
+            "Harbor run API does not currently propagate environment deletion."
+        )
     service = HarborAdapterService(args)
 
     # 1. Resolve identifiers. The group layer assigns a unique session_id per
@@ -236,6 +242,7 @@ async def _generate_with_harbor_async(
                 environment_kwargs=env_kwargs,
                 timeout=args.harbor_timeout,
                 environment_import_path=args.harbor_env_import_path,
+                environment_delete=not retain_environment,
                 trial_name=f"{instance_id}-{sid.rsplit('-', 1)[-1]}",
             )
         else:

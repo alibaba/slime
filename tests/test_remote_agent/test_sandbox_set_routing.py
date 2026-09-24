@@ -174,6 +174,7 @@ def test_run_local_trial_overrides_task_agent_timeout(tmp_path, monkeypatch):
             agent=client.HarborAgentConfig(name="swe-agent"),
             timeout=3600.0,
             timeout_multiplier=1.5,
+            environment_delete=False,
         )
     )
 
@@ -181,6 +182,7 @@ def test_run_local_trial_overrides_task_agent_timeout(tmp_path, monkeypatch):
     assert result.status == "completed"
     assert trial_config.agent.override_timeout_sec == 3600.0
     assert trial_config.timeout_multiplier == 1.5
+    assert trial_config.environment.delete is False
 
 
 if __name__ == "__main__":
