@@ -1,3 +1,0 @@
-[submodule "harbor"]
-	path = harbor
-	url = git@gitlab.alibaba-inc.com:eml/harbor.git

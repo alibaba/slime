@@ -55,7 +55,6 @@ adapter 由 `generate_with_harbor` 首次调用懒启动。（修掉了 e2b base
 | 文件 | 改动 |
 |---|---|
 | `docker/Dockerfile.workspace`（+54）| workspace 镜像：装 Megatron(-e)、加 `.pth` 让 Ray worker 能 import `megatron.training`、装 slime(-e --no-deps)、shortuuid、harbor（ACK sandbox over E2B）。|
-| `.gitmodules`（+3）| 新增子模块 `harbor` → `git@gitlab.alibaba-inc.com:eml/harbor.git`（**内部地址**）。|
 | `.gitignore`（+1）| 忽略项。|
 
 ### 2.5 文档
